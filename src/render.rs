@@ -60,14 +60,16 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
                     redraw = true;
                 }
                 Ok(InputEvent::NextFile) => {
-                    let offsets = file_offsets(&state);
+                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
+                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
                     if let Some(&next) = offsets.iter().find(|&&o| o > scroll) {
                         scroll = next;
                     }
                     redraw = true;
                 }
                 Ok(InputEvent::PrevFile) => {
-                    let offsets = file_offsets(&state);
+                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
+                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
                     if let Some(&prev) = offsets.iter().rev().find(|&&o| o < scroll) {
                         scroll = prev;
                     }
@@ -151,7 +153,7 @@ fn translate(evt: Event) -> Option<InputEvent> {
     }
 }
 
-fn file_offsets(state: &State) -> Vec<u16> {
+fn file_offsets(state: &State, diff_width: u16) -> Vec<u16> {
     let mut offsets = Vec::with_capacity(state.len());
     let mut cur: u32 = 0;
     for (i, update) in state.iter_ordered().enumerate() {
@@ -159,13 +161,13 @@ fn file_offsets(state: &State) -> Vec<u16> {
             cur = cur.saturating_add(2); // empty line + separator
         }
         offsets.push(cur.min(u16::MAX as u32) as u16);
-        cur = cur.saturating_add(file_line_count(update));
+        cur = cur.saturating_add(file_visual_rows(update, diff_width));
     }
     offsets
 }
 
-fn file_line_count(update: &DiffUpdate) -> u32 {
-    let mut n: u32 = 1; // header
+fn file_visual_rows(update: &DiffUpdate, width: u16) -> u32 {
+    let mut n: u32 = 1; // header line (assumed to fit)
     if update.binary {
         return n + 1;
     }
@@ -173,9 +175,36 @@ fn file_line_count(update: &DiffUpdate) -> u32 {
         return n + 1;
     }
     for hunk in &update.hunks {
-        n = n.saturating_add(1 + hunk.lines.len() as u32); // @@ line + content lines
+        n = n.saturating_add(1); // @@ header
+        for line in &hunk.lines {
+            let (content, prefix_len) = match line {
+                HunkLine::Context(s) => (s.as_str(), 4), // "    "
+                HunkLine::Added(s) => (s.as_str(), 4),   // "  + "
+                HunkLine::Removed(s) => (s.as_str(), 4), // "  - "
+            };
+            n = n.saturating_add(line_visual_rows(content.chars().count() + prefix_len, width));
+        }
     }
     n
+}
+
+fn line_visual_rows(content_chars: usize, width: u16) -> u32 {
+    let w = width.max(1) as u32;
+    let len = content_chars as u32;
+    if len == 0 {
+        return 1;
+    }
+    len.div_ceil(w)
+}
+
+fn diff_inner_width(area_width: u16, sidebar_visible: bool) -> u16 {
+    let diff_outer = if sidebar_visible {
+        let sb = sidebar_width(area_width);
+        area_width.saturating_sub(sb)
+    } else {
+        area_width
+    };
+    diff_outer.saturating_sub(2) // block borders
 }
 
 fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -193,6 +222,14 @@ fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16, sidebar_visible:
         height: area.height.saturating_sub(footer_h),
     };
 
+    let diff_w = diff_inner_width(main.width, sidebar_visible);
+    let offsets = file_offsets(state, diff_w);
+    let current_idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
+    let focused_path = state
+        .iter_ordered()
+        .nth(current_idx)
+        .map(|u| u.path.display().to_string());
+
     if sidebar_visible {
         let sb_w = sidebar_width(main.width);
         let sidebar_area = Rect {
@@ -207,12 +244,10 @@ fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16, sidebar_visible:
             width: main.width.saturating_sub(sb_w),
             height: main.height,
         };
-        let offsets = file_offsets(state);
-        let current_idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
         draw_sidebar(frame, sidebar_area, state, current_idx);
-        draw_diff(frame, diff_area, state, scroll);
+        draw_diff(frame, diff_area, state, scroll, focused_path.as_deref());
     } else {
-        draw_diff(frame, main, state, scroll);
+        draw_diff(frame, main, state, scroll, focused_path.as_deref());
     }
 
     let footer = Rect {
@@ -349,12 +384,22 @@ fn truncate_left(s: &str, max: usize) -> String {
     out
 }
 
-fn draw_diff(frame: &mut ratatui::Frame, area: Rect, state: &State, scroll: u16) {
+fn draw_diff(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    state: &State,
+    scroll: u16,
+    focused: Option<&str>,
+) {
     let inner_width = area.width.saturating_sub(2);
     let lines = render_lines(state, inner_width);
+    let title = match focused {
+        Some(p) if !p.is_empty() => format!(" diff · {} ", p),
+        _ => " diff ".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" diff ")
+        .title(title)
         .border_style(Style::default().fg(Color::DarkGray));
     let para = Paragraph::new(lines)
         .block(block)
