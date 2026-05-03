@@ -153,7 +153,7 @@ pub fn run(repo_root: PathBuf) -> Result<(), Error> {
 - Single `select!` over `up_rx` and an input channel fed by a tiny crossterm-input thread.
 - On `DiffUpdate`: `state.apply(update)`, redraw.
 - On input: scroll, quit, or no-op.
-- On `Tick` (1 Hz, optional): refresh "5s ago" timestamps without changing data.
+- Fully event-driven — no periodic ticks. Repo metadata changes (commits, staging, `.gitignore` edits) propagate from the watcher as `ChangeHint::Rescan` signals.
 - Terminal restoration via a `Drop`-implementing guard around `enter_alternate_screen` / `enable_raw_mode`. Panics restore the terminal cleanly via `std::panic::set_hook` chained into the same guard.
 
 ### CLI surface (clap, derive)
@@ -208,7 +208,7 @@ Versions pinned during implementation step. `gix` features will be revisited the
 ## Risks
 
 - **gix diff API surface drift.** `gix` is pre-1.0 and reorganizes occasionally. *Mitigation*: pin a known version at implementation time; keep the diff module thin so a future migration touches one file.
-- **fsnotify on macOS misses changes inside `.git/`.** *Mitigation*: explicitly ignore `.git/` in the watcher path filter, and never depend on watcher events for index changes — those are user-driven (`git add`) and we re-poll status on a tick or on demand.
+- **fsnotify on macOS misses changes inside `.git/`.** *Mitigation*: classify `.git/` events — `HEAD`, `index`, `refs/*`, `ORIG_HEAD`, `MERGE_HEAD`, `FETCH_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `packed-refs` emit a `ChangeHint::Rescan` signal so commits/staging/checkouts propagate. All other `.git/` paths stay filtered. In practice fsevent on macOS does see git's atomic `lock+rename` updates; if a particular setup misses these, surface the gap via tracing rather than papering over with polling.
 - **Editor atomic-save patterns** (write-to-tempfile + rename) can produce a "delete then create" sequence. *Mitigation*: `notify-debouncer-full` already coalesces these into a single change event for the destination path.
 - **Terminal corruption on panic.** *Mitigation*: panic hook + `Drop` guard restores the terminal before the panic message prints.
 - **High-frequency saves** (e.g. a formatter on save firing across the repo) could swamp the diff worker. *Mitigation*: bounded channel back-pressure naturally drops the lag onto the watcher; debouncer window absorbs bursts. If observed in practice, raise debounce window or move to a worker pool.
@@ -236,32 +236,34 @@ Versions pinned during implementation step. `gix` features will be revisited the
 
 ## Implementation Notes
 
-**Status**: Implemented 2026-05-03. `cargo build` + `cargo clippy --all-targets -- -D warnings` clean. `cargo test` passes (3 lib unit tests + 3 smoke tests).
+**Status**: Implemented 2026-05-03. `cargo build` + `cargo clippy --all-targets -- -D warnings` clean. `cargo test` passes (6 lib unit tests + 5 smoke tests).
 
 Deviations and decisions from the original sketch:
 
 - **`mtime: SystemTime`, not `Instant`.** File modification time is naturally `SystemTime` (from `fs::metadata().modified()`), and we sort by it directly. `Instant` would have required a baseline shift and lost meaning across the initial scan.
 - **`imara-diff` direct, not `gix::object::blob::diff::Platform`.** The gix-side Platform requires setting up a `gix_diff::blob::Platform` resource cache, which is heavier than necessary. We instead read the HEAD blob bytes and worktree bytes ourselves and feed them straight to `imara_diff::Diff::compute(Algorithm::Histogram, …)`. Adds one explicit dep (`imara-diff = "0.2"`), saves substantial setup code.
-- **`HunkLine::Context` defined but not emitted in MVP.** Hunks render as removals followed by additions, no context. The variant exists in the type so a future change can surface context without breaking callers.
-- **Initial scan runs on a separate spawned thread** so `diff::spawn_worker` returns immediately. The render loop receives initial-scan updates through the same `up_tx` as live updates. This deviates slightly from "blocking on startup" — the *worker setup* doesn't block, but the user sees an empty list for ~50–200ms before initial entries flow in. Better UX than a blocked startup.
+- **Hunk context lines: 3, with adjacent hunks merged.** Two hunks merge when their context regions would overlap (`B.before.start - A.before.end <= 2 * CONTEXT`). Context lines are walked from `input.before` (identical to `input.after` at unchanged positions). `HunkLine::Context` is now actually emitted.
+- **Fully event-driven, no periodic ticks.** The original sketch hedged with "we re-poll status on a tick or on demand." This was wrong for a live streamer — polling is the thing this tool exists to avoid, even at the metadata layer. Instead the watcher classifies `.git/` paths and emits `ChangeHint::Rescan` signals on `HEAD`, `index`, `refs/*`, `ORIG_HEAD`, `MERGE_HEAD`, `FETCH_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `packed-refs`. The diff worker has no ticker — it only acts on signals. Commits, staging, checkouts all propagate through fsnotify.
+- **`.gitignore` is filtered via `gix`'s excludes stack** (the proven Git-compatible matcher), not a hand-rolled implementation. The watcher builds a `gix::worktree::Stack` from `Repository::excludes()` once at startup and consults it on every event. When any `.gitignore` changes anywhere in the tree, the stack is rebuilt in place and a `Rescan` signal fires so previously-shown ignored paths drop and newly-allowed paths surface.
+- **Quit-time drop order matters.** `app.rs` declares `_worker_guard` *before* `_watcher_guard` so on shutdown the watcher drops first → `ev_tx` closes → the worker's `ev_rx.recv()` returns `Err` immediately → worker thread exits → `WorkerGuard::drop` joins instantly. The reverse order deadlocked: the worker would block on `ev_rx.recv()` (sender held alive by the still-undropped watcher) while `WorkerGuard::drop` waited on the join, forcing the user to Ctrl-C and leaving the terminal in raw mode (exit 130).
+- **Initial scan runs on the worker thread itself**, before the event loop. `spawn_worker` returns instantly; the worker does the scan and emits updates through `up_tx`. The user sees an empty list for ~50–200ms before initial entries flow in. Simpler than the throwaway-thread approach.
 - **Binary detection is the standard "null byte in first 8KB" heuristic** rather than gix's heuristic. Cheap, correct in practice, and decouples us from gix internals.
 - **Watcher debounce window: 100ms.** Not specified in the plan; chosen to absorb editor save bursts (write+rename+chmod) while staying well under 150ms p95.
 - **`gix` features pinned to `["max-performance-safe", "sha1", "status", "blob-diff", "dirwalk", "excludes"]`.** Default features pull in network transports we don't need; this is the minimum that compiles `status`-driven workflows. Without explicit `sha1`, `gix-hash` fails to compile (defaults include `sha1` but disabling defaults drops it).
-- **`Error::Term` distinct from `Error::Io`.** Crossterm errors are `std::io::Error` but have no associated path; keeping them separate avoids a dummy path on terminal failures.
+- **`Error::Term` distinct from `Error::Io`.** Crossterm errors are `std::io::Error` but have no associated path; keeping them separate avoids a dummy path on terminal failures. `Error::Excludes` added for excludes-stack setup failures.
 
 Files shipped:
 
 - `src/error.rs` — `Error` enum + `Result` alias
 - `src/state.rs` — `State`, `DiffUpdate`, `Hunk`, `HunkLine`, `ChangeKind` (+ unit tests)
-- `src/watcher.rs` — `notify-debouncer-full` wrapper, `.git/` filter
-- `src/diff.rs` — `gix`-backed initial scan + per-event recompute, runs on worker thread
-- `src/app.rs` — channel wiring, guards
+- `src/watcher.rs` — `notify-debouncer-full` wrapper; gix excludes filter; `.git/` classification with `Rescan` signals; `.gitignore` reload
+- `src/diff.rs` — `gix`-backed initial scan + per-event recompute + `Rescan` handling; hunk context+merge; runs on worker thread
+- `src/app.rs` — channel wiring, guards (worker declared before watcher for clean quit)
 - `src/render.rs` — ratatui draw, input thread, panic-hook + Drop terminal guard
 - `src/main.rs` — clap CLI, walk-up repo root resolution, anyhow at the boundary
 - `src/lib.rs` — module re-exports
-- `tests/smoke.rs` — 3 e2e tests against temp git repos
+- `tests/smoke.rs` — 5 e2e tests against temp git repos (modify-and-order, untracked classification, gitignore filtering, rescan-after-external-commit, revert-drops-entry)
 
 Open follow-ups (not blocking MVP):
-- Hunk context lines (HunkLine::Context goes unused right now).
 - Validation checklist item "p95 latency < 150ms" needs a Criterion bench, deferred.
 - Sidebar (separate plan: `plans/sidebar/sidebar.md`).

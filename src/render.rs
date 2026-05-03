@@ -133,7 +133,8 @@ fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16) {
     let area = frame.area();
-    let lines = render_lines(state);
+    let inner_width = area.width.saturating_sub(2);
+    let lines = render_lines(state, inner_width);
     let title = format!(" gitstream — {} file(s) changed ", state.len());
     let block = Block::default()
         .borders(Borders::ALL)
@@ -158,7 +159,7 @@ fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16) {
     frame.render_widget(hint, footer);
 }
 
-fn render_lines(state: &State) -> Vec<Line<'static>> {
+fn render_lines(state: &State, width: u16) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if state.is_empty() {
         out.push(Line::from(Span::styled(
@@ -167,28 +168,48 @@ fn render_lines(state: &State) -> Vec<Line<'static>> {
         )));
         return out;
     }
-    for update in state.iter_ordered() {
+    for (i, update) in state.iter_ordered().enumerate() {
+        if i > 0 {
+            out.push(Line::from(""));
+            out.push(separator_line(width));
+        }
         out.extend(render_file(update));
-        out.push(Line::from(""));
     }
     out
 }
 
+fn separator_line(width: u16) -> Line<'static> {
+    let n = width.max(1) as usize;
+    Line::from(Span::styled(
+        "─".repeat(n),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
 fn render_file(update: &DiffUpdate) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    let path_display = update.path.display().to_string();
-    let header = match &update.status {
-        ChangeKind::Added => format!("+ added: {}", path_display),
-        ChangeKind::Modified => format!("~ modified: {}", path_display),
-        ChangeKind::Deleted => format!("- deleted: {}", path_display),
-        ChangeKind::Untracked => format!("? untracked: {}", path_display),
-        ChangeKind::Renamed { from } => {
-            format!("→ renamed: {} → {}", from.display(), path_display)
-        }
+    let (label, color) = match &update.status {
+        ChangeKind::Added => (" ADDED ", Color::Green),
+        ChangeKind::Modified => (" MODIFIED ", Color::Yellow),
+        ChangeKind::Deleted => (" DELETED ", Color::Red),
+        ChangeKind::Untracked => (" UNTRACKED ", Color::Cyan),
+        ChangeKind::Renamed { .. } => (" RENAMED ", Color::Magenta),
     };
-    let summary = format!(" +{} -{}", update.added, update.removed);
+    let path_display = match &update.status {
+        ChangeKind::Renamed { from } => format!("{} → {}", from.display(), update.path.display()),
+        _ => update.path.display().to_string(),
+    };
+    let summary = format!("  +{} -{}", update.added, update.removed);
     out.push(Line::from(vec![
-        Span::styled(header, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            label,
+            Style::default()
+                .bg(color)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(path_display, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(summary, Style::default().fg(Color::DarkGray)),
     ]));
 
