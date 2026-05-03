@@ -38,6 +38,13 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[error("excludes stack error at {path}: {source}", path = path.display())]
+    Excludes {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

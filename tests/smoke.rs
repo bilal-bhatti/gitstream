@@ -29,6 +29,10 @@ fn init_repo() -> tempfile::TempDir {
     dir
 }
 
+fn open_repo(repo: &PathBuf) -> gix::ThreadSafeRepository {
+    gix::open(repo).expect("gix::open").into_sync()
+}
+
 fn drain_into_state(rx: &crossbeam_channel::Receiver<gitstream::state::DiffUpdate>, state: &mut State, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -47,7 +51,7 @@ fn pipeline_picks_up_modifications_and_orders_by_mtime() {
     let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
     let (up_tx, up_rx) = bounded(64);
 
-    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
 
     let mut state = State::new();
 
@@ -99,7 +103,7 @@ fn untracked_file_classified_as_untracked() {
 
     let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
     let (up_tx, up_rx) = bounded(64);
-    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
 
     fs::write(repo.join("new.txt"), "fresh\n").unwrap();
     ev_tx
@@ -124,13 +128,99 @@ fn untracked_file_classified_as_untracked() {
 }
 
 #[test]
+fn rescan_signal_drops_entry_after_external_commit() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
+
+    fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\nNEW\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("a.txt"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    let mut state = State::new();
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+    assert_eq!(state.len(), 1, "modification should appear");
+
+    // commit the change with an external git command — no watcher event fires
+    // for the worktree file, but the watcher would normally observe .git/HEAD
+    // and .git/index changes and emit a Rescan signal. Simulate that here.
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "--quiet", "-m", "external"]);
+    ev_tx
+        .send(WatchEvent {
+            path: PathBuf::new(),
+            kind: ChangeHint::Rescan,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+    assert_eq!(
+        state.len(),
+        0,
+        "rescan should observe the new HEAD and drop the entry"
+    );
+
+    drop(ev_tx);
+}
+
+#[test]
+fn gitignored_paths_are_not_emitted() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+    fs::write(repo.join(".gitignore"), "ignored/\n*.log\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "--quiet", "-m", "ignore"]);
+
+    fs::create_dir(repo.join("ignored")).unwrap();
+    fs::write(repo.join("ignored/blob"), "x\n").unwrap();
+    fs::write(repo.join("scratch.log"), "spam\n").unwrap();
+    fs::write(repo.join("kept.txt"), "kept\n").unwrap();
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+    let _worker =
+        diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
+
+    let mut state = State::new();
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+
+    let paths: Vec<PathBuf> = state.iter_ordered().map(|u| u.path.clone()).collect();
+    assert!(
+        paths.contains(&PathBuf::from("kept.txt")),
+        "kept.txt should appear, got {:?}",
+        paths
+    );
+    assert!(
+        !paths.contains(&PathBuf::from("ignored/blob")),
+        "ignored/blob should be filtered, got {:?}",
+        paths
+    );
+    assert!(
+        !paths.contains(&PathBuf::from("scratch.log")),
+        "scratch.log should be filtered, got {:?}",
+        paths
+    );
+
+    drop(ev_tx);
+}
+
+#[test]
 fn revert_drops_entry() {
     let repo_dir = init_repo();
     let repo = repo_dir.path().to_path_buf();
 
     let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
     let (up_tx, up_rx) = bounded(64);
-    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
 
     fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\nNEW\n").unwrap();
     ev_tx

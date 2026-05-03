@@ -6,3 +6,4 @@ Cargo.lock.bak
 .vscode/
 *.profraw
 .envrc
+.claude/
