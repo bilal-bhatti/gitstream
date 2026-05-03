@@ -1,6 +1,6 @@
 # gitstream
 
-[![Release](https://img.shields.io/github/v/release/bilal-bhatti/gitstream?color=blue)](https://github.com/bilal-bhatti/gitstream/releases/latest) [![Downloads](https://img.shields.io/github/downloads/bilal-bhatti/gitstream/total)](https://github.com/bilal-bhatti/gitstream/releases) [![Release workflow](https://img.shields.io/github/actions/workflow/status/bilal-bhatti/gitstream/release.yml?label=release)](https://github.com/bilal-bhatti/gitstream/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/bilal-bhatti/gitstream?color=blue)](https://github.com/bilal-bhatti/gitstream/releases/latest) [![Crates.io](https://img.shields.io/crates/v/gitstream?color=blue)](https://crates.io/crates/gitstream) [![Downloads](https://img.shields.io/github/downloads/bilal-bhatti/gitstream/total)](https://github.com/bilal-bhatti/gitstream/releases) [![Release workflow](https://img.shields.io/github/actions/workflow/status/bilal-bhatti/gitstream/release.yml?label=release)](https://github.com/bilal-bhatti/gitstream/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `tail -f` for your working tree.
 
@@ -24,6 +24,14 @@ brew install bilal-bhatti/taps/gitstream
 ```
 
 Pulls a prebuilt binary from the latest [GitHub release](https://github.com/bilal-bhatti/gitstream/releases). macOS (Apple Silicon and Intel) and Linux x86_64 are published.
+
+### Cargo
+
+```bash
+cargo install gitstream
+```
+
+Pulls and compiles from [crates.io](https://crates.io/crates/gitstream). Requires a Rust toolchain.
 
 ### From source
 
