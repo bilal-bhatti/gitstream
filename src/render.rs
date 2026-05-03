@@ -148,8 +148,8 @@ fn translate(evt: Event) -> Option<InputEvent> {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(InputEvent::Quit),
         (KeyCode::Char('j'), _) | (KeyCode::Down, _) => Some(InputEvent::ScrollDown(1)),
         (KeyCode::Char('k'), _) | (KeyCode::Up, _) => Some(InputEvent::ScrollUp(1)),
-        (KeyCode::PageDown, _) => Some(InputEvent::ScrollDown(20)),
-        (KeyCode::PageUp, _) => Some(InputEvent::ScrollUp(20)),
+        (KeyCode::PageDown, _) | (KeyCode::Char('d'), _) => Some(InputEvent::ScrollDown(20)),
+        (KeyCode::PageUp, _) | (KeyCode::Char('u'), _) => Some(InputEvent::ScrollUp(20)),
         (KeyCode::Home, _) | (KeyCode::Char('g'), _) => Some(InputEvent::Top),
         (KeyCode::Char('n'), _) => Some(InputEvent::NextFile),
         (KeyCode::Char('b'), _) => Some(InputEvent::PrevFile),
@@ -281,7 +281,7 @@ fn draw(
         height: footer_h,
     };
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit · j/k line · n/b file · g top · s sidebar · PgUp/PgDn page ",
+        " q quit · j/k line · u/d page · n/b file · g top · s sidebar ",
         Style::default().fg(Color::DarkGray),
     )]));
     frame.render_widget(hint, footer);
