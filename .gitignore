@@ -7,3 +7,4 @@ Cargo.lock.bak
 *.profraw
 .envrc
 .claude/
+criterion/

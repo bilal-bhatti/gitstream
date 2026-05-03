@@ -148,6 +148,30 @@ struct Engine {
     repo: gix::ThreadSafeRepository,
 }
 
+#[doc(hidden)]
+pub mod bench {
+    //! Escape hatch for `benches/diff.rs`. Not part of the stable API.
+    use super::*;
+
+    pub struct BenchEngine(Engine);
+
+    pub fn open(repo_root: &Path) -> Result<BenchEngine> {
+        let repo = gix::open(repo_root)
+            .map_err(|e| Error::RepoOpen {
+                path: repo_root.to_path_buf(),
+                source: Box::new(e),
+            })?
+            .into_sync();
+        Ok(BenchEngine(Engine::new(repo_root.to_path_buf(), repo)))
+    }
+
+    impl BenchEngine {
+        pub fn recompute(&self, abs_path: &Path) -> Result<Option<DiffUpdate>> {
+            self.0.recompute(abs_path)
+        }
+    }
+}
+
 impl Engine {
     fn new(repo_root: PathBuf, repo: gix::ThreadSafeRepository) -> Self {
         Self { repo_root, repo }
