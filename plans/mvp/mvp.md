@@ -31,7 +31,7 @@ notify-debouncer-full ──► [WatchEvent] ──► diff worker ──► [Di
 
 - **Watcher** wraps `notify-debouncer-full`. Already debounces per-path event bursts (editor saves fire write+rename+chmod). Emits one `WatchEvent { path, kind, timestamp }` per debounced change.
 - **Diff worker** receives a `WatchEvent`, asks `gix` for the diff of that file vs `HEAD`, and emits a `DiffUpdate { path, mtime, status, hunks, added, removed }`. Errors on the hot path are logged with context and dropped — they do not crash the render loop. (This is *not* a silent fallback; it is the documented behavior for transient diff failures, e.g. a file disappearing mid-event. We log and continue.)
-- **Render loop** owns `State`, applies each `DiffUpdate` (insert/replace/remove), re-sorts by mtime descending, and repaints. Input handling (q/Ctrl-C/PgUp/PgDn/j/k) lives here.
+- **Render loop** owns `State`, applies each `DiffUpdate` (insert/replace/remove), re-sorts by mtime descending, and repaints. Input handling (q/Ctrl-C/u/d/j/k) lives here.
 
 **Diff target**: working tree vs `HEAD`. Captures both staged and unstaged changes — the full set of "things I've done since last commit". Single target only in MVP, no flag.
 

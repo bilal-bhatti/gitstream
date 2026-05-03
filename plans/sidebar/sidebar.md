@@ -46,8 +46,8 @@ key        action
 ──────────────────────────────────────────
 j / ↓      diff: scroll down 1 line
 k / ↑      diff: scroll up 1 line
-PgDn       diff: scroll down 20 lines
-PgUp       diff: scroll up 20 lines
+d / PgDn   diff: scroll down 20 lines
+u / PgUp   diff: scroll up 20 lines
 g / Home   diff: scroll to top
 n          diff: jump to next file's header
 b          diff: jump to previous file's header
