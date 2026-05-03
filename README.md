@@ -1,5 +1,7 @@
 # gitstream
 
+[![Release](https://img.shields.io/github/v/release/bilal-bhatti/gitstream?color=blue)](https://github.com/bilal-bhatti/gitstream/releases/latest) [![Downloads](https://img.shields.io/github/downloads/bilal-bhatti/gitstream/total)](https://github.com/bilal-bhatti/gitstream/releases) [![Release workflow](https://img.shields.io/github/actions/workflow/status/bilal-bhatti/gitstream/release.yml?label=release)](https://github.com/bilal-bhatti/gitstream/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `tail -f` for your working tree.
 
 Trying to figure out what your coding agent is *actually* doing while it edits 15 files? Tired of flipping between `git diff` panes, `git status`, that one watch loop you never killed, and a fourth terminal because you forgot which file the agent touched last? Just want to see your tree breathe during a long refactor?
