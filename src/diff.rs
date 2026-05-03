@@ -2,6 +2,10 @@ use crate::error::{Error, Result};
 use crate::state::{ChangeKind, DiffUpdate, Hunk, HunkLine};
 use crate::watcher::{ChangeHint, WatchEvent};
 use crossbeam_channel::{Receiver, Sender};
+use gix::attrs::Search as AttrSearch;
+use gix::attrs::search::{MetadataCollection, Outcome as AttrOutcome};
+use gix::bstr::ByteSlice;
+use gix::glob::pattern::Case;
 use imara_diff::{Algorithm, Diff, InternedInput};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -120,6 +124,8 @@ fn handle_event(
 }
 
 fn rescan(engine: &mut Engine, up_tx: &Sender<DiffUpdate>, known: &mut HashSet<PathBuf>) -> bool {
+    // Pick up `.gitattributes` edits that happened since the last rescan.
+    engine.refresh_attrs();
     let updates = match engine.initial_scan() {
         Ok(u) => u,
         Err(err) => {
@@ -187,7 +193,19 @@ struct Engine {
     /// `None` for paths that aren't (added or never-tracked). HEAD only
     /// changes on `Rescan`, so this saves a tree walk per worktree event.
     head_blobs: HashMap<PathBuf, Option<Vec<u8>>>,
+    /// `.gitattributes` patterns from `.git/info/attributes` and the repo
+    /// root, plus the builtin `binary` macro. Refreshed on every `Rescan`
+    /// so users can edit `.gitattributes` and have changes pick up after
+    /// the next rescan tick.
+    attr_search: AttrSearch,
+    attr_collection: MetadataCollection,
+    attr_outcome: AttrOutcome,
 }
+
+/// Attribute names we query when classifying a path. `binary` is the macro
+/// `*.bin binary` expands to (it sets `-diff -merge -text`); checking `text`
+/// and `diff` directly catches `-text` / `-diff` written verbatim too.
+const BINARY_ATTRS: &[&str] = &["diff", "text", "binary"];
 
 #[doc(hidden)]
 pub mod bench {
@@ -215,12 +233,63 @@ pub mod bench {
 
 impl Engine {
     fn new(repo_root: PathBuf, repo: gix::ThreadSafeRepository) -> Self {
+        let (attr_search, attr_collection) = load_attrs(&repo_root);
+        let mut attr_outcome = AttrOutcome::default();
+        attr_outcome.initialize_with_selection(&attr_collection, BINARY_ATTRS.iter().copied());
         Self {
             repo_root,
             repo,
             head_oid: None,
             head_blobs: HashMap::new(),
+            attr_search,
+            attr_collection,
+            attr_outcome,
         }
+    }
+
+    fn refresh_attrs(&mut self) {
+        let (search, collection) = load_attrs(&self.repo_root);
+        self.attr_search = search;
+        self.attr_collection = collection;
+        self.attr_outcome
+            .initialize_with_selection(&self.attr_collection, BINARY_ATTRS.iter().copied());
+    }
+
+    /// Consult `.gitattributes` for `rel`. `Some(true)` if the file is
+    /// declared binary (or non-text/non-diff), `Some(false)` if explicitly
+    /// declared text/diff, `None` if no attribute applies and the caller
+    /// should fall back to a content scan.
+    fn classify_binary_by_attrs(&mut self, rel: &Path) -> Option<bool> {
+        self.attr_outcome.reset();
+        let bs = gix::path::into_bstr(rel);
+        let unix = gix::path::to_unix_separators_on_windows(bs);
+        let matched = self.attr_search.pattern_matching_relative_path(
+            unix.as_bstr(),
+            Case::Sensitive,
+            Some(false), // is_dir = false; we only call this on files
+            &mut self.attr_outcome,
+        );
+        if !matched {
+            return None;
+        }
+        let mut explicit_text = false;
+        for m in self.attr_outcome.iter_selected() {
+            let name = m.assignment.name.as_str();
+            let state = m.assignment.state;
+            match name {
+                "binary" if state.is_set() => return Some(true),
+                "diff" | "text" => {
+                    if state.is_unset() {
+                        return Some(true);
+                    }
+                    if state.is_set() {
+                        explicit_text = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if explicit_text { Some(false) } else { None }
     }
 
     fn initial_scan(&mut self) -> Result<Vec<DiffUpdate>> {
@@ -295,7 +364,11 @@ impl Engine {
             }));
         }
 
-        if looks_binary(&before) || looks_binary(&after) {
+        let binary = match self.classify_binary_by_attrs(&rel) {
+            Some(b) => b,
+            None => looks_binary(&before) || looks_binary(&after),
+        };
+        if binary {
             return Ok(Some(DiffUpdate {
                 path: rel,
                 mtime,
@@ -496,12 +569,44 @@ fn file_mtime(path: &Path) -> Result<SystemTime> {
 }
 
 /// Null-byte scan over the first 8000 bytes — the same heuristic git's xdiff
-/// uses (`xdiff/xutils.c::buffer_is_binary`). Cheap and consistent with what a
-/// user sees from `git diff`. A future improvement would be to honor an
-/// explicit `binary` attribute via `.gitattributes`; doing that requires
-/// pulling in gix's `attributes` feature.
+/// uses (`xdiff/xutils.c::buffer_is_binary`). Used as a fallback when
+/// `.gitattributes` doesn't make a definitive call about a path.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&b| b == 0)
+}
+
+/// Build a `Search` populated with the builtin `binary` macro plus, if they
+/// exist, `.git/info/attributes` and a single repo-root `.gitattributes`.
+/// Nested `.gitattributes` files in subdirectories aren't walked — that's a
+/// worktree-stack concern; for the common case (root-level rules like
+/// `*.png binary`) this is enough. Failures degrade silently to "builtin
+/// only" so we never block the worker on a malformed attributes file.
+fn load_attrs(repo_root: &Path) -> (AttrSearch, MetadataCollection) {
+    let mut buf = Vec::new();
+    let mut collection = MetadataCollection::default();
+    let candidates: Vec<PathBuf> = [
+        repo_root.join(".git").join("info").join("attributes"),
+        repo_root.join(".gitattributes"),
+    ]
+    .into_iter()
+    .filter(|p| p.exists())
+    .collect();
+    let search = match AttrSearch::new_globals(candidates, &mut buf, &mut collection) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "loading .gitattributes failed; binary detection falls back to byte scan"
+            );
+            // Empty Search lacks the `[attr]binary` macro that new_globals
+            // would have installed; fall back gracefully by retrying with
+            // no candidate files (which still installs the macro).
+            collection = MetadataCollection::default();
+            AttrSearch::new_globals(std::iter::empty::<PathBuf>(), &mut buf, &mut collection)
+                .unwrap_or_default()
+        }
+    };
+    (search, collection)
 }
 
 fn bstr_to_path(bs: &gix::bstr::BStr) -> PathBuf {

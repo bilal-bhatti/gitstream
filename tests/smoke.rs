@@ -249,3 +249,40 @@ fn revert_drops_entry() {
 
     drop(ev_tx);
 }
+
+#[test]
+fn gitattributes_marks_text_file_binary() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+    fs::write(repo.join(".gitattributes"), "*.lock binary\n").unwrap();
+    fs::write(repo.join("vendor.lock"), "this looks like text\n").unwrap();
+    git(&repo, &["add", ".gitattributes", "vendor.lock"]);
+    git(&repo, &["commit", "--quiet", "-m", "lock"]);
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
+
+    fs::write(repo.join("vendor.lock"), "still ascii\nbut changed\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("vendor.lock"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    let mut state = State::new();
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+
+    let entry = state
+        .get(&PathBuf::from("vendor.lock"))
+        .expect("modified .lock file should appear in state");
+    assert!(
+        entry.binary,
+        "*.lock binary in .gitattributes must override the byte scan"
+    );
+    assert!(entry.hunks.is_empty(), "binary files have no hunks");
+
+    drop(ev_tx);
+}

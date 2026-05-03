@@ -577,3 +577,22 @@ impl Drop for TerminalGuard {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
 }
+
+#[doc(hidden)]
+pub mod bench {
+    //! Escape hatch for `benches/render.rs`. Not part of the stable API.
+    use crate::state::State;
+    use ratatui::text::Line;
+
+    pub fn render_lines<'a>(state: &'a State, width: u16) -> Vec<Line<'a>> {
+        super::render_lines(state, width)
+    }
+
+    pub fn content_total_rows(state: &State, width: u16) -> u16 {
+        super::content_total_rows(state, width)
+    }
+
+    pub fn file_offsets(state: &State, width: u16) -> Vec<u16> {
+        super::file_offsets(state, width)
+    }
+}
