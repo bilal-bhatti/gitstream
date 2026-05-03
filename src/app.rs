@@ -24,6 +24,11 @@ pub fn run(repo_root: PathBuf) -> Result<()> {
     let _worker_guard = diff::spawn_worker(repo_root.clone(), repo.clone(), ev_rx, up_tx)?;
     let _watcher_guard = watcher::spawn(&repo_root, repo, ev_tx)?;
 
-    render::run(up_rx)?;
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repository")
+        .to_string();
+    render::run(&repo_name, up_rx)?;
     Ok(())
 }

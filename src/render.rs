@@ -20,7 +20,7 @@ use std::time::Duration;
 
 const TICK: Duration = Duration::from_millis(250);
 
-pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
+pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
     let _guard = TerminalGuard::install()?;
     let mut terminal = make_terminal()?;
     let mut state = State::new();
@@ -33,7 +33,7 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
 
     loop {
         terminal
-            .draw(|f| draw(f, &state, scroll, sidebar_visible))
+            .draw(|f| draw(f, &state, scroll, sidebar_visible, repo_name))
             .map_err(|e| Error::Term { source: e })?;
 
         let mut redraw = false;
@@ -212,7 +212,13 @@ fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     Terminal::new(backend).map_err(|e| Error::Term { source: e })
 }
 
-fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16, sidebar_visible: bool) {
+fn draw(
+    frame: &mut ratatui::Frame,
+    state: &State,
+    scroll: u16,
+    sidebar_visible: bool,
+    repo_name: &str,
+) {
     let area = frame.area();
     let footer_h = 1u16;
     let main = Rect {
@@ -245,9 +251,9 @@ fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16, sidebar_visible:
             height: main.height,
         };
         draw_sidebar(frame, sidebar_area, state, current_idx);
-        draw_diff(frame, diff_area, state, scroll, focused_path.as_deref());
+        draw_diff(frame, diff_area, state, scroll, repo_name, focused_path.as_deref());
     } else {
-        draw_diff(frame, main, state, scroll, focused_path.as_deref());
+        draw_diff(frame, main, state, scroll, repo_name, focused_path.as_deref());
     }
 
     let footer = Rect {
@@ -389,13 +395,14 @@ fn draw_diff(
     area: Rect,
     state: &State,
     scroll: u16,
+    repo_name: &str,
     focused: Option<&str>,
 ) {
     let inner_width = area.width.saturating_sub(2);
     let lines = render_lines(state, inner_width);
     let title = match focused {
-        Some(p) if !p.is_empty() => format!(" diff · {} ", p),
-        _ => " diff ".to_string(),
+        Some(p) if !p.is_empty() => format!(" {} · {} ", repo_name, p),
+        _ => format!(" {} ", repo_name),
     };
     let block = Block::default()
         .borders(Borders::ALL)
