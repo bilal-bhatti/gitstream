@@ -134,6 +134,16 @@ fn draw(frame: &mut Frame, state: &State, view: &View) {
 
 Five files. No new modules, no new dependencies.
 
+### Refactor opportunity (do during sidebar work, not before)
+
+Today `src/render.rs` houses pure-draw functions, the input-listener thread, the `Event → InputEvent` translation, and the dispatch loop in `run()`. At ~280 LOC that's still tractable, but the sidebar work roughly doubles the input surface (mouse hit-tests, `gg`/chord sequences, focus toggle, paused vs live keymaps). When that lands, split:
+
+- `src/input.rs` — `InputEvent`, the listener thread, `translate(Event) → InputEvent` (and its chord/timer state).
+- `src/render.rs` — pure `draw` + helpers (`render_lines`, `render_file`, `separator_line`, `file_offsets`) + `TerminalGuard`. No I/O, no key handling.
+- The `run()` loop (state ownership + `select!` + dispatch) stays where it is, just imports from both.
+
+Don't pre-split for the MVP — it's premature given a single consumer. Trigger is "I'm adding the second keymap" or "the input thread needs chord state."
+
 ## Risks
 
 - **Mouse capture breaks terminal shift-select-to-copy.** Users who rely on copying diff text from the terminal will hit this immediately. *Mitigation*: `--no-mouse` opt-out, documented in `--help`. Most modern terminals also offer a modifier (Option on iTerm2, Shift on most Linux terminals) to override mouse capture and select natively — call this out in README.

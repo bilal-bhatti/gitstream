@@ -58,6 +58,20 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
                     scroll = 0;
                     redraw = true;
                 }
+                Ok(InputEvent::NextFile) => {
+                    let offsets = file_offsets(&state);
+                    if let Some(&next) = offsets.iter().find(|&&o| o > scroll) {
+                        scroll = next;
+                    }
+                    redraw = true;
+                }
+                Ok(InputEvent::PrevFile) => {
+                    let offsets = file_offsets(&state);
+                    if let Some(&prev) = offsets.iter().rev().find(|&&o| o < scroll) {
+                        scroll = prev;
+                    }
+                    redraw = true;
+                }
                 Err(_) => break,
             },
             default(TICK) => {}
@@ -78,6 +92,8 @@ enum InputEvent {
     ScrollUp(u16),
     ScrollDown(u16),
     Top,
+    NextFile,
+    PrevFile,
 }
 
 fn spawn_input_thread(tx: crossbeam_channel::Sender<InputEvent>, stop: Arc<AtomicBool>) {
@@ -122,8 +138,37 @@ fn translate(evt: Event) -> Option<InputEvent> {
         (KeyCode::PageDown, _) => Some(InputEvent::ScrollDown(20)),
         (KeyCode::PageUp, _) => Some(InputEvent::ScrollUp(20)),
         (KeyCode::Home, _) | (KeyCode::Char('g'), _) => Some(InputEvent::Top),
+        (KeyCode::Char('n'), _) => Some(InputEvent::NextFile),
+        (KeyCode::Char('b'), _) => Some(InputEvent::PrevFile),
         _ => None,
     }
+}
+
+fn file_offsets(state: &State) -> Vec<u16> {
+    let mut offsets = Vec::with_capacity(state.len());
+    let mut cur: u32 = 0;
+    for (i, update) in state.iter_ordered().enumerate() {
+        if i > 0 {
+            cur = cur.saturating_add(2); // empty line + separator
+        }
+        offsets.push(cur.min(u16::MAX as u32) as u16);
+        cur = cur.saturating_add(file_line_count(update));
+    }
+    offsets
+}
+
+fn file_line_count(update: &DiffUpdate) -> u32 {
+    let mut n: u32 = 1; // header
+    if update.binary {
+        return n + 1;
+    }
+    if update.hunks.is_empty() && !matches!(update.status, ChangeKind::Deleted) {
+        return n + 1;
+    }
+    for hunk in &update.hunks {
+        n = n.saturating_add(1 + hunk.lines.len() as u32); // @@ line + content lines
+    }
+    n
 }
 
 fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -153,7 +198,7 @@ fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16) {
         height: 1,
     };
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit  •  j/k scroll  •  g top  •  PgUp/PgDn page ",
+        " q quit · j/k line · n/b file · g top · PgUp/PgDn page ",
         Style::default().fg(Color::DarkGray),
     )]));
     frame.render_widget(hint, footer);
