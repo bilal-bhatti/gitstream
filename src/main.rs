@@ -8,6 +8,12 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(
     name = "gitstream",
+    version = env!("GITSTREAM_VERSION"),
+    long_version = concat!(
+        env!("GITSTREAM_VERSION"),
+        "\ncommit: ",
+        env!("GITSTREAM_COMMIT")
+    ),
     about = "real-time git diff watcher — scrolling diffs ordered by mtime"
 )]
 struct Cli {

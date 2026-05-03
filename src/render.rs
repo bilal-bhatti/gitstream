@@ -436,9 +436,11 @@ fn draw_diff(
         Some(p) if !p.is_empty() => format!(" {} · {} ", repo_name, p),
         _ => format!(" {} ", repo_name),
     };
+    let version = format!(" {} ", crate::VERSION);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
+        .title(Line::from(title))
+        .title(Line::from(version).right_aligned())
         .border_style(Style::default().fg(Color::DarkGray));
     let para = Paragraph::new(lines)
         .block(block)
