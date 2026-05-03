@@ -10,9 +10,12 @@ use tracing_subscriber::EnvFilter;
     name = "gitstream",
     version = env!("GITSTREAM_VERSION"),
     long_version = concat!(
+        "version ",
         env!("GITSTREAM_VERSION"),
-        "\ncommit: ",
-        env!("GITSTREAM_COMMIT")
+        "\nCommit: ",
+        env!("GITSTREAM_COMMIT"),
+        "\nBuilt: ",
+        env!("GITSTREAM_BUILT"),
     ),
     about = "real-time git diff watcher — scrolling diffs ordered by mtime"
 )]
