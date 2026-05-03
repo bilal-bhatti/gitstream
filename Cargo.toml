@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Real-time git diff watcher — scrolling diffs ordered by file mtime"
 license = "MIT"
-repository = "https://github.com/alchemainhub/gitstream"
+repository = "https://github.com/bilal-bhatti/gitstream"
+homepage = "https://github.com/bilal-bhatti/gitstream"
 authors = ["Bilal Bhatti"]
 readme = "README.md"
 
@@ -28,6 +29,11 @@ unicode-width = "0.2.1"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dev-dependencies]
 criterion = "0.8.2"
