@@ -80,7 +80,6 @@ These are non-negotiable and shape every design decision:
 
 - Never make assumptions about coding requirements
 - Ask questions for clarification until requirements are clear
-- Never add `Co-Authored-By: Claude ...` trailers to commits
 
 ### Tool Selection
 - **Code search**: prefer `ygrep` first (indexed, fast). Fall back to `Grep`/`Glob` only when ygrep returns nothing.
