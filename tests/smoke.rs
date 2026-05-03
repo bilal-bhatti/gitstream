@@ -1,0 +1,161 @@
+use crossbeam_channel::bounded;
+use gitstream::diff;
+use gitstream::state::{ChangeKind, State};
+use gitstream::watcher::{ChangeHint, WatchEvent};
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+fn git(repo: &PathBuf, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .status()
+        .expect("git invoked from test setup");
+    assert!(status.success(), "git {:?} failed", args);
+}
+
+fn init_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().to_path_buf();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "test"]);
+    fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    fs::write(repo.join("b.txt"), "one\ntwo\nthree\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    dir
+}
+
+fn drain_into_state(rx: &crossbeam_channel::Receiver<gitstream::state::DiffUpdate>, state: &mut State, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(remaining) {
+            Ok(update) => state.apply(update),
+            Err(_) => break,
+        }
+    }
+}
+
+#[test]
+fn pipeline_picks_up_modifications_and_orders_by_mtime() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+
+    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+
+    let mut state = State::new();
+
+    // initial scan emits nothing — clean repo
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(300));
+    assert_eq!(state.len(), 0, "clean repo: no entries expected");
+
+    // modify a.txt, then b.txt — b should sort first
+    fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\nDELTA\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("a.txt"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    fs::write(repo.join("b.txt"), "one\ntwo\nthree\nFOUR\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("b.txt"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+
+    let order: Vec<PathBuf> = state.iter_ordered().map(|u| u.path.clone()).collect();
+    assert_eq!(order.len(), 2, "two changed files expected, got {:?}", order);
+    assert_eq!(order[0], PathBuf::from("b.txt"), "b should be first (mtime desc)");
+    assert_eq!(order[1], PathBuf::from("a.txt"));
+
+    let a = state.get(&PathBuf::from("a.txt")).unwrap();
+    assert!(matches!(a.status, ChangeKind::Modified));
+    assert_eq!(a.added, 1);
+    assert_eq!(a.removed, 0);
+    assert!(!a.binary);
+
+    drop(ev_tx);
+}
+
+#[test]
+fn untracked_file_classified_as_untracked() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+
+    fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("new.txt"),
+            kind: ChangeHint::Create,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    let mut state = State::new();
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
+
+    let entry = state
+        .get(&PathBuf::from("new.txt"))
+        .expect("untracked file should appear in state");
+    assert!(matches!(entry.status, ChangeKind::Untracked));
+    assert_eq!(entry.added, 1);
+    assert_eq!(entry.removed, 0);
+
+    drop(ev_tx);
+}
+
+#[test]
+fn revert_drops_entry() {
+    let repo_dir = init_repo();
+    let repo = repo_dir.path().to_path_buf();
+
+    let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
+    let (up_tx, up_rx) = bounded(64);
+    let _worker = diff::spawn_worker(repo.clone(), ev_rx, up_tx).expect("worker");
+
+    fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\nNEW\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("a.txt"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    let mut state = State::new();
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(300));
+    assert_eq!(state.len(), 1, "modification should be visible");
+
+    fs::write(repo.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    ev_tx
+        .send(WatchEvent {
+            path: repo.join("a.txt"),
+            kind: ChangeHint::Modify,
+            at: Instant::now(),
+        })
+        .unwrap();
+
+    drain_into_state(&up_rx, &mut state, Duration::from_millis(300));
+    assert_eq!(state.len(), 0, "revert should drop entry");
+
+    drop(ev_tx);
+}

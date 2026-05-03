@@ -1,0 +1,275 @@
+use crate::error::{Error, Result};
+use crate::state::{ChangeKind, DiffUpdate, HunkLine, State};
+use crossbeam_channel::{Receiver, RecvTimeoutError, select};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
+
+const TICK: Duration = Duration::from_millis(250);
+
+pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
+    let _guard = TerminalGuard::install()?;
+    let mut terminal = make_terminal()?;
+    let mut state = State::new();
+    let mut scroll: u16 = 0;
+
+    let (input_tx, input_rx) = crossbeam_channel::bounded::<InputEvent>(32);
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_input_thread(input_tx, Arc::clone(&stop));
+
+    loop {
+        terminal
+            .draw(|f| draw(f, &state, scroll))
+            .map_err(|e| Error::Term { source: e })?;
+
+        let mut redraw = false;
+        select! {
+            recv(updates) -> msg => match msg {
+                Ok(update) => {
+                    state.apply(update);
+                    redraw = true;
+                }
+                Err(_) => break,
+            },
+            recv(input_rx) -> msg => match msg {
+                Ok(InputEvent::Quit) => break,
+                Ok(InputEvent::ScrollUp(n)) => {
+                    scroll = scroll.saturating_sub(n);
+                    redraw = true;
+                }
+                Ok(InputEvent::ScrollDown(n)) => {
+                    scroll = scroll.saturating_add(n);
+                    redraw = true;
+                }
+                Ok(InputEvent::Top) => {
+                    scroll = 0;
+                    redraw = true;
+                }
+                Err(_) => break,
+            },
+            default(TICK) => {}
+        }
+
+        if !redraw {
+            // tick fall-through; loop will redraw timestamps once we have them
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InputEvent {
+    Quit,
+    ScrollUp(u16),
+    ScrollDown(u16),
+    Top,
+}
+
+fn spawn_input_thread(tx: crossbeam_channel::Sender<InputEvent>, stop: Arc<AtomicBool>) {
+    thread::Builder::new()
+        .name("input".into())
+        .spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                match event::poll(Duration::from_millis(100)) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        tracing::error!(error = %err, "crossterm poll failed");
+                        return;
+                    }
+                }
+                let evt = match event::read() {
+                    Ok(e) => e,
+                    Err(err) => {
+                        tracing::error!(error = %err, "crossterm read failed");
+                        return;
+                    }
+                };
+                let Some(out) = translate(evt) else { continue };
+                if tx.send(out).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("input thread spawn");
+}
+
+fn translate(evt: Event) -> Option<InputEvent> {
+    let Event::Key(key) = evt else { return None };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('q'), _) => Some(InputEvent::Quit),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(InputEvent::Quit),
+        (KeyCode::Char('j'), _) | (KeyCode::Down, _) => Some(InputEvent::ScrollDown(1)),
+        (KeyCode::Char('k'), _) | (KeyCode::Up, _) => Some(InputEvent::ScrollUp(1)),
+        (KeyCode::PageDown, _) => Some(InputEvent::ScrollDown(20)),
+        (KeyCode::PageUp, _) => Some(InputEvent::ScrollUp(20)),
+        (KeyCode::Home, _) | (KeyCode::Char('g'), _) => Some(InputEvent::Top),
+        _ => None,
+    }
+}
+
+fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    let backend = CrosstermBackend::new(io::stdout());
+    Terminal::new(backend).map_err(|e| Error::Term { source: e })
+}
+
+fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16) {
+    let area = frame.area();
+    let lines = render_lines(state);
+    let title = format!(" gitstream — {} file(s) changed ", state.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(para, area);
+
+    let footer = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let hint = Paragraph::new(Line::from(vec![Span::styled(
+        " q quit  •  j/k scroll  •  g top  •  PgUp/PgDn page ",
+        Style::default().fg(Color::DarkGray),
+    )]));
+    frame.render_widget(hint, footer);
+}
+
+fn render_lines(state: &State) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if state.is_empty() {
+        out.push(Line::from(Span::styled(
+            "  (no changes — waiting for edits)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return out;
+    }
+    for update in state.iter_ordered() {
+        out.extend(render_file(update));
+        out.push(Line::from(""));
+    }
+    out
+}
+
+fn render_file(update: &DiffUpdate) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let path_display = update.path.display().to_string();
+    let header = match &update.status {
+        ChangeKind::Added => format!("+ added: {}", path_display),
+        ChangeKind::Modified => format!("~ modified: {}", path_display),
+        ChangeKind::Deleted => format!("- deleted: {}", path_display),
+        ChangeKind::Untracked => format!("? untracked: {}", path_display),
+        ChangeKind::Renamed { from } => {
+            format!("→ renamed: {} → {}", from.display(), path_display)
+        }
+    };
+    let summary = format!(" +{} -{}", update.added, update.removed);
+    out.push(Line::from(vec![
+        Span::styled(header, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(summary, Style::default().fg(Color::DarkGray)),
+    ]));
+
+    if update.binary {
+        out.push(Line::from(Span::styled(
+            "  (binary — diff suppressed)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return out;
+    }
+
+    if update.hunks.is_empty() && !matches!(update.status, ChangeKind::Deleted) {
+        out.push(Line::from(Span::styled(
+            "  (no textual change)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return out;
+    }
+
+    for hunk in &update.hunks {
+        out.push(Line::from(Span::styled(
+            format!(
+                "  @@ -{},{} +{},{} @@",
+                hunk.old_range.0 + 1,
+                hunk.old_range.1,
+                hunk.new_range.0 + 1,
+                hunk.new_range.1
+            ),
+            Style::default().fg(Color::Cyan),
+        )));
+        for line in &hunk.lines {
+            match line {
+                HunkLine::Context(s) => out.push(Line::from(Span::raw(format!("    {}", s)))),
+                HunkLine::Added(s) => out.push(Line::from(Span::styled(
+                    format!("  + {}", s),
+                    Style::default().fg(Color::Green),
+                ))),
+                HunkLine::Removed(s) => out.push(Line::from(Span::styled(
+                    format!("  - {}", s),
+                    Style::default().fg(Color::Red),
+                ))),
+            }
+        }
+    }
+    out
+}
+
+struct TerminalGuard {
+    _private: (),
+}
+
+static GUARD_INSTALLED: OnceLock<Mutex<bool>> = OnceLock::new();
+
+impl TerminalGuard {
+    fn install() -> Result<Self> {
+        let installed = GUARD_INSTALLED.get_or_init(|| Mutex::new(false));
+        let mut flag = installed.lock().expect("guard mutex");
+        if *flag {
+            return Ok(TerminalGuard { _private: () });
+        }
+        enable_raw_mode().map_err(|e| Error::Term { source: e })?;
+        execute!(io::stdout(), EnterAlternateScreen).map_err(|e| Error::Term { source: e })?;
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            prev_hook(info);
+        }));
+        *flag = true;
+        Ok(TerminalGuard { _private: () })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+#[allow(dead_code)]
+fn select_recv_timeout<T>(rx: &Receiver<T>, timeout: Duration) -> std::result::Result<T, RecvTimeoutError> {
+    rx.recv_timeout(timeout)
+}
