@@ -281,7 +281,7 @@ fn draw(
         height: footer_h,
     };
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit · j/k line · u/d page · n/b file · g top · s sidebar ",
+        " q quit · j/k line · u/d or PgUp/PgDn page · n/b file · g top · s sidebar ",
         Style::default().fg(Color::DarkGray),
     )]));
     frame.render_widget(hint, footer);
