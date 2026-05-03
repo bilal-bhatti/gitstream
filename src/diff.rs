@@ -398,21 +398,30 @@ fn build_hunks_with_context(
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::File::open(path) {
-        Ok(mut f) => {
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| Error::Io {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(Error::Io {
                 path: path.to_path_buf(),
                 source: e,
-            })?;
-            Ok(Some(buf))
+            });
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        }),
+    };
+    if !metadata.file_type().is_file() {
+        // directories, symlinks, sockets, etc. — not diffable
+        return Ok(None);
     }
+    let mut f = fs::File::open(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    Ok(Some(buf))
 }
 
 fn file_mtime(path: &Path) -> Result<SystemTime> {

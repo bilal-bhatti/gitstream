@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -15,13 +17,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let filter =
-        EnvFilter::try_from_env("GITSTREAM_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+    init_tracing()?;
 
     let cli = Cli::parse();
     let start = cli
@@ -33,6 +29,27 @@ fn main() -> Result<()> {
 
     tracing::info!(repo = %repo_root.display(), "starting");
     gitstream::app::run(repo_root)?;
+    Ok(())
+}
+
+/// Tracing always writes to a log file, never to stderr — stderr writes corrupt
+/// the ratatui alternate screen. Default file is /tmp/gitstream.log; override
+/// with `GITSTREAM_LOG_FILE`. Filter via `GITSTREAM_LOG` (defaults to `off`).
+fn init_tracing() -> Result<()> {
+    let filter = EnvFilter::try_from_env("GITSTREAM_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
+    let path = std::env::var("GITSTREAM_LOG_FILE")
+        .unwrap_or_else(|_| "/tmp/gitstream.log".to_string());
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening log file {path}"))?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(Mutex::new(file))
+        .with_ansi(false)
+        .init();
     Ok(())
 }
 
