@@ -62,7 +62,7 @@ fn bench_single_line(c: &mut Criterion) {
     for &n in &[50usize, 500, 5000] {
         let committed = baseline(n);
         let modified = one_line_changed(n);
-        let (dir, file, engine) = make_repo(&committed);
+        let (dir, file, mut engine) = make_repo(&committed);
         fs::write(&file, &modified).unwrap();
         group.throughput(criterion::Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::from_parameter(n), |b| {
@@ -81,7 +81,7 @@ fn bench_scattered(c: &mut Criterion) {
     for &n in &[500usize, 5000] {
         let committed = baseline(n);
         let modified = scattered_changes(n);
-        let (dir, file, engine) = make_repo(&committed);
+        let (dir, file, mut engine) = make_repo(&committed);
         fs::write(&file, &modified).unwrap();
         group.throughput(criterion::Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::from_parameter(n), |b| {
@@ -100,7 +100,7 @@ fn bench_clean(c: &mut Criterion) {
     let mut group = c.benchmark_group("recompute/clean");
     for &n in &[500usize, 5000] {
         let committed = baseline(n);
-        let (dir, file, engine) = make_repo(&committed);
+        let (dir, file, mut engine) = make_repo(&committed);
         // file already matches HEAD; no modification.
         group.bench_function(BenchmarkId::from_parameter(n), |b| {
             b.iter(|| {

@@ -4,7 +4,14 @@ use crate::render;
 use crate::watcher;
 use std::path::PathBuf;
 
-const CHANNEL_CAP: usize = 64;
+/// Watcher → worker. fsnotify bursts (an editor save fires rename + write +
+/// chmod) plus debouncing usually keep this small.
+const EV_CHANNEL_CAP: usize = 64;
+
+/// Worker → render. A `Rescan` of a dirty repo emits one `DiffUpdate` per
+/// changed file in a tight loop, so this needs more headroom than the event
+/// channel; render coalesces drained updates into a single frame.
+const UP_CHANNEL_CAP: usize = 1024;
 
 pub fn run(repo_root: PathBuf) -> Result<()> {
     let repo = gix::open(&repo_root)
@@ -14,11 +21,11 @@ pub fn run(repo_root: PathBuf) -> Result<()> {
         })?
         .into_sync();
 
-    let (ev_tx, ev_rx) = crossbeam_channel::bounded::<watcher::WatchEvent>(CHANNEL_CAP);
-    let (up_tx, up_rx) = crossbeam_channel::bounded::<crate::state::DiffUpdate>(CHANNEL_CAP);
+    let (ev_tx, ev_rx) = crossbeam_channel::bounded::<watcher::WatchEvent>(EV_CHANNEL_CAP);
+    let (up_tx, up_rx) = crossbeam_channel::bounded::<crate::state::DiffUpdate>(UP_CHANNEL_CAP);
 
-    // Drop order is reverse declaration order. Worker must drop *before* watcher
-    // so that on quit the watcher is dropped first → ev_tx closed → worker's
+    // Drop order is reverse declaration order: declare worker first so it drops
+    // last. On quit the watcher drops first → ev_tx closed → worker's
     // ev_rx.recv() returns Err immediately → worker thread exits without
     // blocking the join in WorkerGuard::drop. Otherwise q would deadlock.
     let _worker_guard = diff::spawn_worker(repo_root.clone(), repo.clone(), ev_rx, up_tx)?;

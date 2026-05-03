@@ -3,11 +3,10 @@ use crate::state::{ChangeKind, DiffUpdate, Hunk, HunkLine};
 use crate::watcher::{ChangeHint, WatchEvent};
 use crossbeam_channel::{Receiver, Sender};
 use imara_diff::{Algorithm, Diff, InternedInput};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
@@ -47,8 +46,15 @@ pub struct WorkerGuard {
 
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        if let Some(h) = self.handle.take()
+            && let Err(payload) = h.join()
+        {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic>");
+            tracing::error!(panic = %msg, "diff worker panicked");
         }
     }
 }
@@ -59,7 +65,7 @@ pub fn spawn_worker(
     ev_rx: Receiver<WatchEvent>,
     up_tx: Sender<DiffUpdate>,
 ) -> Result<WorkerGuard> {
-    let engine = Arc::new(Engine::new(repo_root.clone(), repo));
+    let engine = Engine::new(repo_root.clone(), repo);
     let handle = thread::Builder::new()
         .name("diff-worker".into())
         .spawn(move || run(engine, ev_rx, up_tx))
@@ -72,15 +78,15 @@ pub fn spawn_worker(
     })
 }
 
-fn run(engine: Arc<Engine>, ev_rx: Receiver<WatchEvent>, up_tx: Sender<DiffUpdate>) {
+fn run(mut engine: Engine, ev_rx: Receiver<WatchEvent>, up_tx: Sender<DiffUpdate>) {
     let mut known: HashSet<PathBuf> = HashSet::new();
-    if !rescan(&engine, &up_tx, &mut known) {
+    if !rescan(&mut engine, &up_tx, &mut known) {
         return;
     }
     while let Ok(ev) = ev_rx.recv() {
         let ok = match ev.kind {
-            ChangeHint::Rescan => rescan(&engine, &up_tx, &mut known),
-            _ => handle_event(&engine, &ev, &up_tx, &mut known),
+            ChangeHint::Rescan => rescan(&mut engine, &up_tx, &mut known),
+            _ => handle_event(&mut engine, &ev, &up_tx, &mut known),
         };
         if !ok {
             return;
@@ -89,7 +95,7 @@ fn run(engine: Arc<Engine>, ev_rx: Receiver<WatchEvent>, up_tx: Sender<DiffUpdat
 }
 
 fn handle_event(
-    engine: &Engine,
+    engine: &mut Engine,
     ev: &WatchEvent,
     up_tx: &Sender<DiffUpdate>,
     known: &mut HashSet<PathBuf>,
@@ -113,7 +119,7 @@ fn handle_event(
     }
 }
 
-fn rescan(engine: &Engine, up_tx: &Sender<DiffUpdate>, known: &mut HashSet<PathBuf>) -> bool {
+fn rescan(engine: &mut Engine, up_tx: &Sender<DiffUpdate>, known: &mut HashSet<PathBuf>) -> bool {
     let updates = match engine.initial_scan() {
         Ok(u) => u,
         Err(err) => {
@@ -174,6 +180,13 @@ fn clean_update(path: PathBuf, status: ChangeKind) -> DiffUpdate {
 struct Engine {
     repo_root: PathBuf,
     repo: gix::ThreadSafeRepository,
+    /// HEAD tree oid that the cache below was last populated from. When it
+    /// changes (a commit, checkout, etc.) we drop the cache and re-read.
+    head_oid: Option<gix::ObjectId>,
+    /// `rel_path -> Some(blob bytes)` for paths present in HEAD's tree, or
+    /// `None` for paths that aren't (added or never-tracked). HEAD only
+    /// changes on `Rescan`, so this saves a tree walk per worktree event.
+    head_blobs: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 #[doc(hidden)]
@@ -194,7 +207,7 @@ pub mod bench {
     }
 
     impl BenchEngine {
-        pub fn recompute(&self, abs_path: &Path) -> Result<Option<DiffUpdate>> {
+        pub fn recompute(&mut self, abs_path: &Path) -> Result<Option<DiffUpdate>> {
             self.0.recompute(abs_path)
         }
     }
@@ -202,10 +215,15 @@ pub mod bench {
 
 impl Engine {
     fn new(repo_root: PathBuf, repo: gix::ThreadSafeRepository) -> Self {
-        Self { repo_root, repo }
+        Self {
+            repo_root,
+            repo,
+            head_oid: None,
+            head_blobs: HashMap::new(),
+        }
     }
 
-    fn initial_scan(&self) -> Result<Vec<DiffUpdate>> {
+    fn initial_scan(&mut self) -> Result<Vec<DiffUpdate>> {
         let repo = self.repo.to_thread_local();
         let platform = repo.status(gix::progress::Discard).map_err(|e| Error::Diff {
             path: self.repo_root.clone(),
@@ -243,7 +261,7 @@ impl Engine {
         Ok(updates)
     }
 
-    fn recompute(&self, abs_path: &Path) -> Result<Option<DiffUpdate>> {
+    fn recompute(&mut self, abs_path: &Path) -> Result<Option<DiffUpdate>> {
         let rel = match abs_path.strip_prefix(&self.repo_root) {
             Ok(r) => r.to_path_buf(),
             Err(_) => return Ok(None),
@@ -289,9 +307,12 @@ impl Engine {
             }));
         }
 
-        let before_str = String::from_utf8_lossy(&before).into_owned();
-        let after_str = String::from_utf8_lossy(&after).into_owned();
-        let input = InternedInput::new(before_str.as_str(), after_str.as_str());
+        // String::from_utf8_lossy returns Cow<str>: borrowed (zero-copy) when
+        // the bytes are valid UTF-8, owned only when we have to substitute U+FFFD
+        // for invalid sequences. Drop into_owned() so the common case is free.
+        let before_str = String::from_utf8_lossy(&before);
+        let after_str = String::from_utf8_lossy(&after);
+        let input = InternedInput::new(before_str.as_ref(), after_str.as_ref());
         let diff = Diff::compute(Algorithm::Histogram, &input);
         let (hunks, added, removed) = build_hunks_with_context(&diff, &input, CONTEXT_LINES);
 
@@ -306,40 +327,53 @@ impl Engine {
         }))
     }
 
-    fn read_head_blob(&self, rel: &Path) -> Result<Option<Vec<u8>>> {
+    fn read_head_blob(&mut self, rel: &Path) -> Result<Option<Vec<u8>>> {
         let repo = self.repo.to_thread_local();
         let head_id = repo.head_tree_id_or_empty().map_err(|e| Error::Diff {
             path: rel.to_path_buf(),
             source: Box::new(e),
         })?;
-        if head_id.is_empty_tree() {
-            return Ok(None);
+        let oid = head_id.detach();
+
+        if self.head_oid != Some(oid) {
+            self.head_blobs.clear();
+            self.head_oid = Some(oid);
         }
-        let tree = repo
-            .find_object(head_id)
-            .map_err(|e| Error::Diff {
+
+        if let Some(cached) = self.head_blobs.get(rel) {
+            return Ok(cached.clone());
+        }
+
+        let result: Option<Vec<u8>> = if head_id.is_empty_tree() {
+            None
+        } else {
+            let tree = repo
+                .find_object(oid)
+                .map_err(|e| Error::Diff {
+                    path: rel.to_path_buf(),
+                    source: Box::new(e),
+                })?
+                .into_tree();
+            match tree.lookup_entry_by_path(rel).map_err(|e| Error::Diff {
                 path: rel.to_path_buf(),
                 source: Box::new(e),
-            })?
-            .into_tree();
-        let entry = match tree.lookup_entry_by_path(rel).map_err(|e| Error::Diff {
-            path: rel.to_path_buf(),
-            source: Box::new(e),
-        })? {
-            Some(e) => e,
-            None => return Ok(None),
+            })? {
+                Some(entry) if entry.mode().is_blob() => {
+                    let blob = entry
+                        .object()
+                        .map_err(|e| Error::Diff {
+                            path: rel.to_path_buf(),
+                            source: Box::new(e),
+                        })?
+                        .into_blob();
+                    Some(blob.data.clone())
+                }
+                _ => None,
+            }
         };
-        if !entry.mode().is_blob() {
-            return Ok(None);
-        }
-        let blob = entry
-            .object()
-            .map_err(|e| Error::Diff {
-                path: rel.to_path_buf(),
-                source: Box::new(e),
-            })?
-            .into_blob();
-        Ok(Some(blob.data.clone()))
+
+        self.head_blobs.insert(rel.to_path_buf(), result.clone());
+        Ok(result)
     }
 }
 
@@ -444,7 +478,7 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(metadata.len() as usize);
     f.read_to_end(&mut buf).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
@@ -461,6 +495,11 @@ fn file_mtime(path: &Path) -> Result<SystemTime> {
         })
 }
 
+/// Null-byte scan over the first 8000 bytes — the same heuristic git's xdiff
+/// uses (`xdiff/xutils.c::buffer_is_binary`). Cheap and consistent with what a
+/// user sees from `git diff`. A future improvement would be to honor an
+/// explicit `binary` attribute via `.gitattributes`; doing that requires
+/// pulling in gix's `attributes` feature.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&b| b == 0)
 }

@@ -35,13 +35,18 @@ fn main() -> Result<()> {
 /// Tracing always writes to a log file, never to stderr — stderr writes corrupt
 /// the ratatui alternate screen. Default file is /tmp/gitstream.log; override
 /// with `GITSTREAM_LOG_FILE`. Filter via `GITSTREAM_LOG` (defaults to `off`).
+///
+/// We truncate the log on every session start. gitstream is a foreground TUI,
+/// not a daemon — there's no value in growing /tmp/gitstream.log forever, and
+/// "the last run's debug" is what anyone scraping the log actually wants.
 fn init_tracing() -> Result<()> {
     let filter = EnvFilter::try_from_env("GITSTREAM_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
     let path = std::env::var("GITSTREAM_LOG_FILE")
         .unwrap_or_else(|_| "/tmp/gitstream.log".to_string());
     let file = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&path)
         .with_context(|| format!("opening log file {path}"))?;
 

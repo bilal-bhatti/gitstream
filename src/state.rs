@@ -4,10 +4,8 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeKind {
-    Added,
     Modified,
     Deleted,
-    Renamed { from: PathBuf },
     Untracked,
 }
 
@@ -86,7 +84,7 @@ impl State {
     }
 
     pub fn iter_ordered(&self) -> impl Iterator<Item = &DiffUpdate> {
-        self.order.iter().map(|p| &self.by_path[p])
+        self.order.iter().filter_map(|p| self.by_path.get(p))
     }
 
     pub fn get(&self, path: &Path) -> Option<&DiffUpdate> {
