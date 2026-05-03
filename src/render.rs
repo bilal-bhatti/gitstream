@@ -32,6 +32,12 @@ pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
     spawn_input_thread(input_tx, Arc::clone(&stop));
 
     loop {
+        let size = terminal.size().map_err(|e| Error::Term { source: e })?;
+        let diff_w = diff_inner_width(size.width, sidebar_visible);
+        let viewport_h = size.height.saturating_sub(2); // borders + footer
+        let max_scroll = content_total_rows(&state, diff_w).saturating_sub(viewport_h);
+        scroll = scroll.min(max_scroll);
+
         terminal
             .draw(|f| draw(f, &state, scroll, sidebar_visible, repo_name))
             .map_err(|e| Error::Term { source: e })?;
@@ -164,6 +170,17 @@ fn file_offsets(state: &State, diff_width: u16) -> Vec<u16> {
         cur = cur.saturating_add(file_visual_rows(update, diff_width));
     }
     offsets
+}
+
+fn content_total_rows(state: &State, diff_width: u16) -> u16 {
+    let mut total: u32 = 0;
+    for (i, update) in state.iter_ordered().enumerate() {
+        if i > 0 {
+            total = total.saturating_add(2);
+        }
+        total = total.saturating_add(file_visual_rows(update, diff_width));
+    }
+    total.min(u16::MAX as u32) as u16
 }
 
 fn file_visual_rows(update: &DiffUpdate, width: u16) -> u32 {
