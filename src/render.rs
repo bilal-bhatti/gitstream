@@ -25,6 +25,7 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
     let mut terminal = make_terminal()?;
     let mut state = State::new();
     let mut scroll: u16 = 0;
+    let mut sidebar_visible: bool = true;
 
     let (input_tx, input_rx) = crossbeam_channel::bounded::<InputEvent>(32);
     let stop = Arc::new(AtomicBool::new(false));
@@ -32,7 +33,7 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
 
     loop {
         terminal
-            .draw(|f| draw(f, &state, scroll))
+            .draw(|f| draw(f, &state, scroll, sidebar_visible))
             .map_err(|e| Error::Term { source: e })?;
 
         let mut redraw = false;
@@ -72,6 +73,10 @@ pub fn run(updates: Receiver<DiffUpdate>) -> Result<()> {
                     }
                     redraw = true;
                 }
+                Ok(InputEvent::ToggleSidebar) => {
+                    sidebar_visible = !sidebar_visible;
+                    redraw = true;
+                }
                 Err(_) => break,
             },
             default(TICK) => {}
@@ -94,6 +99,7 @@ enum InputEvent {
     Top,
     NextFile,
     PrevFile,
+    ToggleSidebar,
 }
 
 fn spawn_input_thread(tx: crossbeam_channel::Sender<InputEvent>, stop: Arc<AtomicBool>) {
@@ -140,6 +146,7 @@ fn translate(evt: Event) -> Option<InputEvent> {
         (KeyCode::Home, _) | (KeyCode::Char('g'), _) => Some(InputEvent::Top),
         (KeyCode::Char('n'), _) => Some(InputEvent::NextFile),
         (KeyCode::Char('b'), _) => Some(InputEvent::PrevFile),
+        (KeyCode::Char('t'), _) => Some(InputEvent::ToggleSidebar),
         _ => None,
     }
 }
@@ -176,32 +183,184 @@ fn make_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     Terminal::new(backend).map_err(|e| Error::Term { source: e })
 }
 
-fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16) {
+fn draw(frame: &mut ratatui::Frame, state: &State, scroll: u16, sidebar_visible: bool) {
     let area = frame.area();
-    let inner_width = area.width.saturating_sub(2);
-    let lines = render_lines(state, inner_width);
-    let title = format!(" gitstream — {} file(s) changed ", state.len());
+    let footer_h = 1u16;
+    let main = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(footer_h),
+    };
+
+    if sidebar_visible {
+        let sb_w = sidebar_width(main.width);
+        let sidebar_area = Rect {
+            x: main.x,
+            y: main.y,
+            width: sb_w,
+            height: main.height,
+        };
+        let diff_area = Rect {
+            x: main.x + sb_w,
+            y: main.y,
+            width: main.width.saturating_sub(sb_w),
+            height: main.height,
+        };
+        let offsets = file_offsets(state);
+        let current_idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
+        draw_sidebar(frame, sidebar_area, state, current_idx);
+        draw_diff(frame, diff_area, state, scroll);
+    } else {
+        draw_diff(frame, main, state, scroll);
+    }
+
+    let footer = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(footer_h),
+        width: area.width,
+        height: footer_h,
+    };
+    let hint = Paragraph::new(Line::from(vec![Span::styled(
+        " q quit · j/k line · n/b file · g top · t sidebar · PgUp/PgDn page ",
+        Style::default().fg(Color::DarkGray),
+    )]));
+    frame.render_widget(hint, footer);
+}
+
+fn sidebar_width(total: u16) -> u16 {
+    let proposed = (u32::from(total) * 20 / 100) as u16;
+    proposed.clamp(18, 32).min(total.saturating_sub(20))
+}
+
+fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &State, current_idx: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
+        .title(format!(" files ({}) ", state.len()))
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.is_empty() {
+        let para = Paragraph::new(Line::from(Span::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(para, inner);
+        return;
+    }
+
+    let visible_files = ((inner.height as usize) / 2).max(1);
+    let total = state.len();
+    let sb_scroll = sidebar_scroll(current_idx, visible_files, total);
+
+    let lines: Vec<Line<'static>> = state
+        .iter_ordered()
+        .enumerate()
+        .skip(sb_scroll)
+        .take(visible_files)
+        .flat_map(|(idx, update)| sidebar_row(update, idx == current_idx, inner.width))
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn sidebar_scroll(highlight: usize, visible: usize, total: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    if highlight < visible / 2 {
+        return 0;
+    }
+    if highlight >= total.saturating_sub(visible / 2) {
+        return total - visible;
+    }
+    highlight.saturating_sub(visible / 2)
+}
+
+fn sidebar_row(update: &DiffUpdate, highlighted: bool, width: u16) -> Vec<Line<'static>> {
+    let (badge, color) = match &update.status {
+        ChangeKind::Added => ("A", Color::Green),
+        ChangeKind::Modified => ("M", Color::Yellow),
+        ChangeKind::Deleted => ("D", Color::Red),
+        ChangeKind::Untracked => ("?", Color::Cyan),
+        ChangeKind::Renamed { .. } => ("R", Color::Magenta),
+    };
+    let path_str = update.path.display().to_string();
+    let counts = format!("+{} -{}", update.added, update.removed);
+
+    let cursor = if highlighted { "▎" } else { " " };
+    let cursor_style = if highlighted {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let badge_text = format!(" {} ", badge);
+    let badge_style = Style::default()
+        .bg(color)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let path_style = if highlighted {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let counts_style = Style::default().fg(Color::DarkGray);
+
+    // Line 1: cursor(1) + badge(3) + space(1) + path
+    let prefix_len = cursor.chars().count() + badge_text.chars().count() + 1;
+    let path_max = (width as usize).saturating_sub(prefix_len);
+    let path_truncated = truncate_left(&path_str, path_max);
+
+    let line1 = Line::from(vec![
+        Span::styled(cursor.to_string(), cursor_style),
+        Span::styled(badge_text, badge_style),
+        Span::raw(" "),
+        Span::styled(path_truncated, path_style),
+    ]);
+
+    // Line 2: cursor(1) + 4-space indent + counts
+    let line2 = Line::from(vec![
+        Span::styled(cursor.to_string(), cursor_style),
+        Span::raw("    "),
+        Span::styled(counts, counts_style),
+    ]);
+
+    vec![line1, line2]
+}
+
+fn truncate_left(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let take = max - 1;
+    let start = chars.len() - take;
+    let mut out = String::from("…");
+    out.extend(chars[start..].iter());
+    out
+}
+
+fn draw_diff(frame: &mut ratatui::Frame, area: Rect, state: &State, scroll: u16) {
+    let inner_width = area.width.saturating_sub(2);
+    let lines = render_lines(state, inner_width);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" diff ")
         .border_style(Style::default().fg(Color::DarkGray));
     let para = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(para, area);
-
-    let footer = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
-    let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit · j/k line · n/b file · g top · PgUp/PgDn page ",
-        Style::default().fg(Color::DarkGray),
-    )]));
-    frame.render_widget(hint, footer);
 }
 
 fn render_lines(state: &State, width: u16) -> Vec<Line<'static>> {
