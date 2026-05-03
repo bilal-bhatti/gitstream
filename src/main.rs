@@ -50,8 +50,8 @@ fn main() -> Result<()> {
 /// "the last run's debug" is what anyone scraping the log actually wants.
 fn init_tracing() -> Result<()> {
     let filter = EnvFilter::try_from_env("GITSTREAM_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
-    let path = std::env::var("GITSTREAM_LOG_FILE")
-        .unwrap_or_else(|_| "/tmp/gitstream.log".to_string());
+    let path =
+        std::env::var("GITSTREAM_LOG_FILE").unwrap_or_else(|_| "/tmp/gitstream.log".to_string());
     let file = OpenOptions::new()
         .create(true)
         .write(true)

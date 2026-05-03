@@ -33,7 +33,11 @@ fn open_repo(repo: &PathBuf) -> gix::ThreadSafeRepository {
     gix::open(repo).expect("gix::open").into_sync()
 }
 
-fn drain_into_state(rx: &crossbeam_channel::Receiver<gitstream::state::DiffUpdate>, state: &mut State, timeout: Duration) {
+fn drain_into_state(
+    rx: &crossbeam_channel::Receiver<gitstream::state::DiffUpdate>,
+    state: &mut State,
+    timeout: Duration,
+) {
     let deadline = Instant::now() + timeout;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(remaining) {
@@ -83,8 +87,17 @@ fn pipeline_picks_up_modifications_and_orders_by_mtime() {
     drain_into_state(&up_rx, &mut state, Duration::from_millis(500));
 
     let order: Vec<PathBuf> = state.iter_ordered().map(|u| u.path.clone()).collect();
-    assert_eq!(order.len(), 2, "two changed files expected, got {:?}", order);
-    assert_eq!(order[0], PathBuf::from("b.txt"), "b should be first (mtime desc)");
+    assert_eq!(
+        order.len(),
+        2,
+        "two changed files expected, got {:?}",
+        order
+    );
+    assert_eq!(
+        order[0],
+        PathBuf::from("b.txt"),
+        "b should be first (mtime desc)"
+    );
     assert_eq!(order[1], PathBuf::from("a.txt"));
 
     let a = state.get(&PathBuf::from("a.txt")).unwrap();
@@ -187,8 +200,7 @@ fn gitignored_paths_are_not_emitted() {
 
     let (ev_tx, ev_rx) = bounded::<WatchEvent>(64);
     let (up_tx, up_rx) = bounded(64);
-    let _worker =
-        diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
+    let _worker = diff::spawn_worker(repo.clone(), open_repo(&repo), ev_rx, up_tx).expect("worker");
 
     let mut state = State::new();
     drain_into_state(&up_rx, &mut state, Duration::from_millis(500));

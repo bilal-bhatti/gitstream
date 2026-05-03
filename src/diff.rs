@@ -294,10 +294,12 @@ impl Engine {
 
     fn initial_scan(&mut self) -> Result<Vec<DiffUpdate>> {
         let repo = self.repo.to_thread_local();
-        let platform = repo.status(gix::progress::Discard).map_err(|e| Error::Diff {
-            path: self.repo_root.clone(),
-            source: Box::new(e),
-        })?;
+        let platform = repo
+            .status(gix::progress::Discard)
+            .map_err(|e| Error::Diff {
+                path: self.repo_root.clone(),
+                source: Box::new(e),
+            })?;
 
         let iter = platform.into_iter(None).map_err(|e| Error::Diff {
             path: self.repo_root.clone(),
@@ -489,7 +491,9 @@ fn build_hunks_with_context(
 
         for i in pre_b..h.before.start {
             let token = input.before[i as usize];
-            lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
+            lines.push(HunkLine::Context(normalize_for_display(
+                input.interner[token],
+            )));
         }
 
         let mut i = h.before.start;
@@ -499,17 +503,23 @@ fn build_hunks_with_context(
             let added = j < h.after.end && diff.is_added(j);
             if removed {
                 let token = input.before[i as usize];
-                lines.push(HunkLine::Removed(normalize_for_display(input.interner[token])));
+                lines.push(HunkLine::Removed(normalize_for_display(
+                    input.interner[token],
+                )));
                 total_removed += 1;
                 i += 1;
             } else if added {
                 let token = input.after[j as usize];
-                lines.push(HunkLine::Added(normalize_for_display(input.interner[token])));
+                lines.push(HunkLine::Added(normalize_for_display(
+                    input.interner[token],
+                )));
                 total_added += 1;
                 j += 1;
             } else if i < h.before.end && j < h.after.end {
                 let token = input.before[i as usize];
-                lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
+                lines.push(HunkLine::Context(normalize_for_display(
+                    input.interner[token],
+                )));
                 i += 1;
                 j += 1;
             } else {
@@ -519,7 +529,9 @@ fn build_hunks_with_context(
 
         for i in h.before.end..post_b {
             let token = input.before[i as usize];
-            lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
+            lines.push(HunkLine::Context(normalize_for_display(
+                input.interner[token],
+            )));
         }
 
         hunks.push(Hunk {
@@ -670,8 +682,16 @@ mod tests {
         assert_eq!(hunks.len(), 1);
         let lines = lines_of(&hunks[0]);
         let expected_pad: String = " ".repeat(TAB_WIDTH);
-        assert!(lines.iter().any(|(k, v)| *k == "rem" && *v == format!("{expected_pad}b")));
-        assert!(lines.iter().any(|(k, v)| *k == "add" && *v == format!("{expected_pad}B")));
+        assert!(
+            lines
+                .iter()
+                .any(|(k, v)| *k == "rem" && *v == format!("{expected_pad}b"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|(k, v)| *k == "add" && *v == format!("{expected_pad}B"))
+        );
     }
 
     #[test]

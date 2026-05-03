@@ -44,7 +44,11 @@ fn populate(n_files: usize, lines_per_file: usize) -> State {
     let base = SystemTime::UNIX_EPOCH;
     for i in 0..n_files {
         let mtime = base + Duration::from_secs(i as u64);
-        state.apply(make_update(&format!("file_{i:03}.rs"), lines_per_file, mtime));
+        state.apply(make_update(
+            &format!("file_{i:03}.rs"),
+            lines_per_file,
+            mtime,
+        ));
     }
     state
 }

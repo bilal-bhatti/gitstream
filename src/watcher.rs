@@ -1,9 +1,7 @@
 use crate::error::{Error, Result};
 use crossbeam_channel::Sender;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
-};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

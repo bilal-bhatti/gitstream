@@ -269,9 +269,23 @@ fn draw(
             height: main.height,
         };
         draw_sidebar(frame, sidebar_area, state, current_idx);
-        draw_diff(frame, diff_area, state, scroll, repo_name, focused_path.as_deref());
+        draw_diff(
+            frame,
+            diff_area,
+            state,
+            scroll,
+            repo_name,
+            focused_path.as_deref(),
+        );
     } else {
-        draw_diff(frame, main, state, scroll, repo_name, focused_path.as_deref());
+        draw_diff(
+            frame,
+            main,
+            state,
+            scroll,
+            repo_name,
+            focused_path.as_deref(),
+        );
     }
 
     let footer = Rect {
@@ -368,9 +382,8 @@ fn sidebar_row(update: &DiffUpdate, highlighted: bool, width: u16) -> Vec<Line<'
 
     // Line 1: cursor(1) + badge(3) + space(1) + path. Use display width for
     // the prefix in case any glyph in cursor/badge is ever a wide char.
-    let prefix_len = UnicodeWidthStr::width(cursor)
-        + UnicodeWidthStr::width(badge_text.as_str())
-        + 1;
+    let prefix_len =
+        UnicodeWidthStr::width(cursor) + UnicodeWidthStr::width(badge_text.as_str()) + 1;
     let path_max = (width as usize).saturating_sub(prefix_len);
     let path_truncated = truncate_left(&path_str, path_max);
 
@@ -518,8 +531,16 @@ fn render_file(update: &DiffUpdate) -> Vec<Line<'_>> {
         // Git uses `@@ -0,0 +1,N @@` for a new file (start is 0 when count is 0)
         // and `@@ -1,N +0,0 @@` for full deletion. Without the conditional we'd
         // render `-1,0` / `+1,0`, which is malformed.
-        let old_start = if hunk.old_range.1 == 0 { 0 } else { hunk.old_range.0 + 1 };
-        let new_start = if hunk.new_range.1 == 0 { 0 } else { hunk.new_range.0 + 1 };
+        let old_start = if hunk.old_range.1 == 0 {
+            0
+        } else {
+            hunk.old_range.0 + 1
+        };
+        let new_start = if hunk.new_range.1 == 0 {
+            0
+        } else {
+            hunk.new_range.0 + 1
+        };
         out.push(Line::from(Span::styled(
             format!(
                 "  @@ -{},{} +{},{} @@",
@@ -531,10 +552,9 @@ fn render_file(update: &DiffUpdate) -> Vec<Line<'_>> {
         // `format!("    {}", s)` per line per frame.
         for line in &hunk.lines {
             match line {
-                HunkLine::Context(s) => out.push(Line::from(vec![
-                    Span::raw("    "),
-                    Span::raw(s.as_str()),
-                ])),
+                HunkLine::Context(s) => {
+                    out.push(Line::from(vec![Span::raw("    "), Span::raw(s.as_str())]))
+                }
                 HunkLine::Added(s) => out.push(Line::from(vec![
                     Span::styled("  + ", Style::default().fg(Color::Green)),
                     Span::styled(s.as_str(), Style::default().fg(Color::Green)),

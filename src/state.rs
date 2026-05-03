@@ -131,7 +131,10 @@ mod tests {
         s.apply(mk("b", t2, 1));
         s.apply(mk("c", t0, 1));
         let paths: Vec<_> = s.iter_ordered().map(|u| u.path.clone()).collect();
-        assert_eq!(paths, vec![PathBuf::from("b"), PathBuf::from("a"), PathBuf::from("c")]);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("b"), PathBuf::from("a"), PathBuf::from("c")]
+        );
     }
 
     #[test]
