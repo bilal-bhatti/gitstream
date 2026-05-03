@@ -12,6 +12,34 @@ use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 const CONTEXT_LINES: u32 = 3;
+const TAB_WIDTH: usize = 4;
+
+/// Strip the line terminator imara-diff includes in tokens and expand `\t` to
+/// the next tab stop. Ratatui's grapheme iterator silently drops every
+/// `char::is_control` codepoint — including `\t` — so a tab-indented line would
+/// otherwise render with its indentation gone.
+fn normalize_for_display(s: &str) -> String {
+    let s = s.strip_suffix('\n').unwrap_or(s);
+    let s = s.strip_suffix('\r').unwrap_or(s);
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + TAB_WIDTH);
+    let mut col: usize = 0;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let pad = TAB_WIDTH - (col % TAB_WIDTH);
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            col += pad;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
 
 pub struct WorkerGuard {
     handle: Option<JoinHandle<()>>,
@@ -354,7 +382,7 @@ fn build_hunks_with_context(
 
         for i in pre_b..h.before.start {
             let token = input.before[i as usize];
-            lines.push(HunkLine::Context(input.interner[token].to_string()));
+            lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
         }
 
         let mut i = h.before.start;
@@ -364,17 +392,17 @@ fn build_hunks_with_context(
             let added = j < h.after.end && diff.is_added(j);
             if removed {
                 let token = input.before[i as usize];
-                lines.push(HunkLine::Removed(input.interner[token].to_string()));
+                lines.push(HunkLine::Removed(normalize_for_display(input.interner[token])));
                 total_removed += 1;
                 i += 1;
             } else if added {
                 let token = input.after[j as usize];
-                lines.push(HunkLine::Added(input.interner[token].to_string()));
+                lines.push(HunkLine::Added(normalize_for_display(input.interner[token])));
                 total_added += 1;
                 j += 1;
             } else if i < h.before.end && j < h.after.end {
                 let token = input.before[i as usize];
-                lines.push(HunkLine::Context(input.interner[token].to_string()));
+                lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
                 i += 1;
                 j += 1;
             } else {
@@ -384,7 +412,7 @@ fn build_hunks_with_context(
 
         for i in h.before.end..post_b {
             let token = input.before[i as usize];
-            lines.push(HunkLine::Context(input.interner[token].to_string()));
+            lines.push(HunkLine::Context(normalize_for_display(input.interner[token])));
         }
 
         hunks.push(Hunk {
@@ -479,15 +507,40 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                ("ctx", "a\n".into()),
-                ("ctx", "b\n".into()),
-                ("ctx", "c\n".into()),
-                ("rem", "d\n".into()),
-                ("add", "D\n".into()),
-                ("ctx", "e\n".into()),
-                ("ctx", "f\n".into()),
+                ("ctx", "a".into()),
+                ("ctx", "b".into()),
+                ("ctx", "c".into()),
+                ("rem", "d".into()),
+                ("add", "D".into()),
+                ("ctx", "e".into()),
+                ("ctx", "f".into()),
             ]
         );
+    }
+
+    #[test]
+    fn tabs_expand_to_next_tab_stop() {
+        let before = "a\n\tb\n";
+        let after = "a\n\tB\n";
+        let hunks = diff_from(before, after, 0);
+        assert_eq!(hunks.len(), 1);
+        let lines = lines_of(&hunks[0]);
+        let expected_pad: String = " ".repeat(TAB_WIDTH);
+        assert!(lines.iter().any(|(k, v)| *k == "rem" && *v == format!("{expected_pad}b")));
+        assert!(lines.iter().any(|(k, v)| *k == "add" && *v == format!("{expected_pad}B")));
+    }
+
+    #[test]
+    fn crlf_line_endings_are_stripped() {
+        let before = "a\r\nb\r\n";
+        let after = "a\r\nB\r\n";
+        let hunks = diff_from(before, after, 0);
+        let lines = lines_of(&hunks[0]);
+        // no \r or \n should survive into the rendered content
+        for (_, content) in &lines {
+            assert!(!content.contains('\n'));
+            assert!(!content.contains('\r'));
+        }
     }
 
     #[test]
