@@ -270,7 +270,7 @@ fn draw(
 }
 
 fn sidebar_width(total: u16) -> u16 {
-    let proposed = (u32::from(total) * 20 / 100) as u16;
+    let proposed = (u32::from(total) * 25 / 100) as u16;
     proposed.clamp(18, 32).min(total.saturating_sub(20))
 }
 
