@@ -15,11 +15,21 @@ It's useful any time someone or something else is editing your code:
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install bilal-bhatti/taps/gitstream
+```
+
+Pulls a prebuilt binary from the latest [GitHub release](https://github.com/bilal-bhatti/gitstream/releases). macOS (Apple Silicon and Intel) and Linux x86_64 are published.
+
+### From source
+
 ```bash
 cargo install --path .
 ```
 
-Installs `gitstream` into `~/.cargo/bin`.
+Installs `gitstream` into `~/.cargo/bin`. The binary is stamped with the git tag at build time, so `gitstream --version` reflects exactly what you installed.
 
 ## Use
 
