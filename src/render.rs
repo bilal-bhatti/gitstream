@@ -154,7 +154,7 @@ fn translate(evt: Event) -> Option<InputEvent> {
         (KeyCode::Home, _) | (KeyCode::Char('g'), _) => Some(InputEvent::Top),
         (KeyCode::Char('n'), _) => Some(InputEvent::NextFile),
         (KeyCode::Char('b'), _) => Some(InputEvent::PrevFile),
-        (KeyCode::Char('t'), _) => Some(InputEvent::ToggleSidebar),
+        (KeyCode::Char('s'), _) => Some(InputEvent::ToggleSidebar),
         _ => None,
     }
 }
@@ -280,7 +280,7 @@ fn draw(
         height: footer_h,
     };
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit · j/k line · n/b file · g top · t sidebar · PgUp/PgDn page ",
+        " q quit · j/k line · n/b file · g top · s sidebar · PgUp/PgDn page ",
         Style::default().fg(Color::DarkGray),
     )]));
     frame.render_widget(hint, footer);

@@ -40,7 +40,7 @@ The diff target is **working tree vs `HEAD`** — both staged and unstaged chang
 | `n`            | jump to next file    |
 | `b`            | jump back to previous file |
 | `g`, `Home`    | jump to top          |
-| `t`            | toggle sidebar       |
+| `s`            | toggle sidebar       |
 | `PgDn`, `PgUp` | scroll one page      |
 
 ## Why not just `watch git diff`?
