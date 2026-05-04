@@ -294,12 +294,18 @@ impl Engine {
 
     fn initial_scan(&mut self) -> Result<Vec<DiffUpdate>> {
         let repo = self.repo.to_thread_local();
+        // Per-file emission, not per-directory. The default collapses an
+        // untracked directory into a single entry whose path can't be
+        // recompute()'d (it's not a file), so its contents would never
+        // surface until the user touched them and the watcher picked them
+        // up individually.
         let platform = repo
             .status(gix::progress::Discard)
             .map_err(|e| Error::Diff {
                 path: self.repo_root.clone(),
                 source: Box::new(e),
-            })?;
+            })?
+            .untracked_files(gix::status::UntrackedFiles::Files);
 
         let iter = platform.into_iter(None).map_err(|e| Error::Diff {
             path: self.repo_root.clone(),
