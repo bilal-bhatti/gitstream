@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use terminal_colorsaurus::{QueryOptions, ThemeMode, theme_mode};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,7 +24,45 @@ use unicode_width::UnicodeWidthStr;
 
 const TICK: Duration = Duration::from_millis(250);
 
+struct Palette {
+    /// Subtle row-highlight bg for the focused sidebar entry.
+    row_bg: Color,
+    /// Foreground for path text on the highlighted row — must contrast with
+    /// `row_bg`. White on dark themes, Black on light themes.
+    highlight_fg: Color,
+}
+
+static PALETTE: OnceLock<Palette> = OnceLock::new();
+
+fn palette() -> &'static Palette {
+    PALETTE.get_or_init(|| {
+        let dark = match theme_mode(QueryOptions::default()) {
+            Ok(ThemeMode::Light) => false,
+            Ok(ThemeMode::Dark) => true,
+            Err(e) => {
+                tracing::debug!("OSC 11 background query failed; assuming dark: {e}");
+                true
+            }
+        };
+        if dark {
+            Palette {
+                row_bg: Color::Indexed(237),
+                highlight_fg: Color::White,
+            }
+        } else {
+            Palette {
+                row_bg: Color::Indexed(250),
+                highlight_fg: Color::Black,
+            }
+        }
+    })
+}
+
 pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> Result<()> {
+    // Resolve the palette before raw mode + alt screen — terminal-colorsaurus
+    // does its OSC 11 query against a normal-mode tty, and pre-warming the
+    // OnceLock here keeps later draw calls allocation-free.
+    palette();
     let guard = TerminalGuard::install()?;
     let mut terminal = make_terminal()?;
     let mut state = State::new();
@@ -424,7 +463,7 @@ fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &State, current_i
         return;
     }
 
-    let visible_files = ((inner.height as usize) / 2).max(1);
+    let visible_files = ((inner.height as usize) / 3).max(1);
     let total = state.len();
     let sb_scroll = sidebar_scroll(current_idx, visible_files, total);
 
@@ -462,24 +501,35 @@ fn sidebar_row(update: &DiffUpdate, highlighted: bool, width: u16) -> Vec<Line<'
     let counts = format!("+{} -{}", update.added, update.removed);
 
     let cursor = if highlighted { "▎" } else { " " };
-    let cursor_style = if highlighted {
+    let row_bg = if highlighted {
+        Some(palette().row_bg)
+    } else {
+        None
+    };
+    let with_bg = |s: Style| match row_bg {
+        Some(c) => s.bg(c),
+        None => s,
+    };
+
+    let cursor_style = with_bg(if highlighted {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
-    };
+    });
     let badge_text = format!(" {} ", badge);
     let badge_style = Style::default()
         .bg(color)
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
-    let path_style = if highlighted {
+    let path_style = with_bg(if highlighted {
         Style::default()
-            .fg(Color::White)
+            .fg(palette().highlight_fg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-    };
-    let counts_style = Style::default().fg(Color::DarkGray);
+    });
+    let counts_style = with_bg(Style::default().fg(Color::DarkGray));
+    let pad_style = with_bg(Style::default());
 
     // Line 1: cursor(1) + badge(3) + space(1) + path. Use display width for
     // the prefix in case any glyph in cursor/badge is ever a wide char.
@@ -487,22 +537,45 @@ fn sidebar_row(update: &DiffUpdate, highlighted: bool, width: u16) -> Vec<Line<'
         UnicodeWidthStr::width(cursor) + UnicodeWidthStr::width(badge_text.as_str()) + 1;
     let path_max = (width as usize).saturating_sub(prefix_len);
     let path_truncated = truncate_left(&path_str, path_max);
+    let line1_used = prefix_len + UnicodeWidthStr::width(path_truncated.as_str());
+    let line1_pad = (width as usize).saturating_sub(line1_used);
 
-    let line1 = Line::from(vec![
+    let mut line1_spans = vec![
         Span::styled(cursor.to_string(), cursor_style),
         Span::styled(badge_text, badge_style),
-        Span::raw(" "),
+        Span::styled(" ", pad_style),
         Span::styled(path_truncated, path_style),
-    ]);
+    ];
+    if highlighted && line1_pad > 0 {
+        line1_spans.push(Span::styled(" ".repeat(line1_pad), pad_style));
+    }
 
     // Line 2: cursor(1) + 4-space indent + counts
-    let line2 = Line::from(vec![
+    let line2_used = 1 + 4 + UnicodeWidthStr::width(counts.as_str());
+    let line2_pad = (width as usize).saturating_sub(line2_used);
+    let mut line2_spans = vec![
         Span::styled(cursor.to_string(), cursor_style),
-        Span::raw("    "),
+        Span::styled("    ", pad_style),
         Span::styled(counts, counts_style),
-    ]);
+    ];
+    if highlighted && line2_pad > 0 {
+        line2_spans.push(Span::styled(" ".repeat(line2_pad), pad_style));
+    }
 
-    vec![line1, line2]
+    // Line 3: spacer between rows. On highlighted rows it continues the marker
+    // and tinted background so the entry reads as one block; on others it's
+    // empty whitespace, giving non-flush separation.
+    let line3 = if highlighted {
+        let pad = (width as usize).saturating_sub(1);
+        Line::from(vec![
+            Span::styled(cursor.to_string(), cursor_style),
+            Span::styled(" ".repeat(pad), pad_style),
+        ])
+    } else {
+        Line::from("")
+    };
+
+    vec![Line::from(line1_spans), Line::from(line2_spans), line3]
 }
 
 /// Truncate `s` from the left so its display width fits in `max` cells.
