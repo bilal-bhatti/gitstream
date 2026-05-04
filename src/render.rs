@@ -13,7 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io::{self, Stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,6 +28,7 @@ pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> 
     let mut terminal = make_terminal()?;
     let mut state = State::new();
     let mut scroll: u16 = 0;
+    let mut focused_path: Option<PathBuf> = None;
     let mut sidebar_visible: bool = true;
 
     let (input_tx, input_rx) = crossbeam_channel::bounded::<InputEvent>(32);
@@ -40,9 +41,10 @@ pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> 
         let viewport_h = size.height.saturating_sub(2); // borders + footer
         let max_scroll = content_total_rows(&state, diff_w).saturating_sub(viewport_h);
         scroll = scroll.min(max_scroll);
+        let focused_idx = focused_index(&state, focused_path.as_deref());
 
         terminal
-            .draw(|f| draw(f, &state, scroll, sidebar_visible, repo_name))
+            .draw(|f| draw(f, &state, scroll, focused_idx, sidebar_visible, repo_name))
             .map_err(|e| Error::Term { source: e })?;
 
         select! {
@@ -66,35 +68,45 @@ pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> 
                 Ok(InputEvent::Quit) => break 'main,
                 Ok(InputEvent::ScrollUp(n)) => {
                     scroll = scroll.saturating_sub(n);
+                    focused_path = path_at_scroll(&state, diff_w, scroll);
                 }
                 Ok(InputEvent::ScrollDown(n)) => {
                     scroll = scroll.saturating_add(n);
+                    focused_path = path_at_scroll(&state, diff_w, scroll);
                 }
                 Ok(InputEvent::Top) => {
                     scroll = 0;
+                    focused_path = state.order().first().cloned();
                 }
                 Ok(InputEvent::NextFile) => {
-                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
-                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
-                    if let Some(&next) = offsets.iter().find(|&&o| o > scroll) {
-                        scroll = next;
+                    let cur = focused_idx;
+                    if cur + 1 < state.len() {
+                        focused_path = state.order().get(cur + 1).cloned();
+                        let offsets = file_offsets(&state, diff_w);
+                        scroll = offsets.get(cur + 1).copied().unwrap_or(scroll);
                     }
                 }
                 Ok(InputEvent::PrevFile) => {
-                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
-                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
-                    if let Some(&prev) = offsets.iter().rev().find(|&&o| o < scroll) {
-                        scroll = prev;
+                    // First press inside a file rewinds to its top; second moves up a file.
+                    let offsets = file_offsets(&state, diff_w);
+                    let cur_offset = offsets.get(focused_idx).copied().unwrap_or(0);
+                    if scroll > cur_offset {
+                        scroll = cur_offset;
+                    } else if focused_idx > 0 {
+                        let prev = focused_idx - 1;
+                        focused_path = state.order().get(prev).cloned();
+                        scroll = offsets.get(prev).copied().unwrap_or(scroll);
                     }
                 }
                 Ok(InputEvent::ToggleSidebar) => {
                     sidebar_visible = !sidebar_visible;
                 }
                 Ok(InputEvent::Edit) => {
-                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
-                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
-                    let idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
-                    let Some(rel) = state.iter_ordered().nth(idx).map(|u| u.path.clone()) else {
+                    let Some(rel) = state
+                        .iter_ordered()
+                        .nth(focused_idx)
+                        .map(|u| u.path.clone())
+                    else {
                         continue;
                     };
                     let abs = repo_root.join(&rel);
@@ -118,6 +130,26 @@ pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> 
         let _ = h.join();
     }
     Ok(())
+}
+
+/// Resolve a tracked path to its current index in the ordered file list.
+/// Falls back to 0 when the path is unset or has been dropped from state.
+fn focused_index(state: &State, focused_path: Option<&Path>) -> usize {
+    let Some(path) = focused_path else { return 0 };
+    state
+        .order()
+        .iter()
+        .position(|p| p.as_path() == path)
+        .unwrap_or(0)
+}
+
+/// File at the top of the viewport for a given scroll offset — the largest
+/// file offset that's still ≤ scroll. Used to re-derive focus when the user
+/// scrolls with j/k/u/d.
+fn path_at_scroll(state: &State, diff_w: u16, scroll: u16) -> Option<PathBuf> {
+    let offsets = file_offsets(state, diff_w);
+    let idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
+    state.order().get(idx).cloned()
 }
 
 /// Suspend the TUI, run the user's editor on `path`, then rebuild.
@@ -304,6 +336,7 @@ fn draw(
     frame: &mut ratatui::Frame,
     state: &State,
     scroll: u16,
+    focused_idx: usize,
     sidebar_visible: bool,
     repo_name: &str,
 ) {
@@ -316,9 +349,7 @@ fn draw(
         height: area.height.saturating_sub(footer_h),
     };
 
-    let diff_w = diff_inner_width(main.width, sidebar_visible);
-    let offsets = file_offsets(state, diff_w);
-    let current_idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
+    let current_idx = focused_idx;
     let focused_path = state
         .iter_ordered()
         .nth(current_idx)
