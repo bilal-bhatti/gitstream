@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::state::{ChangeKind, DiffUpdate, HunkLine, State};
-use crossbeam_channel::{Receiver, TryRecvError, select};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -13,16 +13,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io::{self, Stdout};
+use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 const TICK: Duration = Duration::from_millis(250);
 
-pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
-    let _guard = TerminalGuard::install()?;
+pub fn run(repo_name: &str, repo_root: &Path, updates: Receiver<DiffUpdate>) -> Result<()> {
+    let guard = TerminalGuard::install()?;
     let mut terminal = make_terminal()?;
     let mut state = State::new();
     let mut scroll: u16 = 0;
@@ -30,7 +32,7 @@ pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
 
     let (input_tx, input_rx) = crossbeam_channel::bounded::<InputEvent>(32);
     let stop = Arc::new(AtomicBool::new(false));
-    spawn_input_thread(input_tx, Arc::clone(&stop));
+    let mut input_handle = Some(spawn_input_thread(input_tx.clone(), Arc::clone(&stop)));
 
     'main: loop {
         let size = terminal.size().map_err(|e| Error::Term { source: e })?;
@@ -88,6 +90,23 @@ pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
                 Ok(InputEvent::ToggleSidebar) => {
                     sidebar_visible = !sidebar_visible;
                 }
+                Ok(InputEvent::Edit) => {
+                    let area = terminal.size().map(|s| s.width).unwrap_or(80);
+                    let offsets = file_offsets(&state, diff_inner_width(area, sidebar_visible));
+                    let idx = offsets.iter().rposition(|&o| o <= scroll).unwrap_or(0);
+                    let Some(rel) = state.iter_ordered().nth(idx).map(|u| u.path.clone()) else {
+                        continue;
+                    };
+                    let abs = repo_root.join(&rel);
+                    edit_file(
+                        &abs,
+                        &guard,
+                        &mut terminal,
+                        &input_tx,
+                        &stop,
+                        &mut input_handle,
+                    );
+                }
                 Err(_) => break 'main,
             },
             default(TICK) => {}
@@ -95,7 +114,53 @@ pub fn run(repo_name: &str, updates: Receiver<DiffUpdate>) -> Result<()> {
     }
 
     stop.store(true, Ordering::Relaxed);
+    if let Some(h) = input_handle.take() {
+        let _ = h.join();
+    }
     Ok(())
+}
+
+/// Suspend the TUI, run the user's editor on `path`, then rebuild.
+///
+/// Tear-down (drop input thread, leave alt screen, disable raw mode) is the
+/// only safe way to yield the tty — `event::read()` won't unblock to check a
+/// pause flag, so the input thread would race the editor for keystrokes.
+fn edit_file(
+    path: &Path,
+    guard: &TerminalGuard,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    input_tx: &Sender<InputEvent>,
+    stop: &Arc<AtomicBool>,
+    input_handle: &mut Option<JoinHandle<()>>,
+) {
+    stop.store(true, Ordering::Relaxed);
+    if let Some(h) = input_handle.take() {
+        let _ = h.join();
+    }
+    if let Err(e) = guard.suspend() {
+        tracing::error!(error = %e, "tui suspend failed");
+    }
+
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let mut parts = editor.split_whitespace();
+    let prog = parts.next().unwrap_or("vi");
+    let extra: Vec<&str> = parts.collect();
+
+    let result = Command::new(prog).args(&extra).arg(path).status();
+    if let Err(e) = result {
+        tracing::error!(editor = %editor, path = %path.display(), error = %e, "editor spawn failed");
+    }
+
+    if let Err(e) = guard.resume() {
+        tracing::error!(error = %e, "tui resume failed");
+    }
+    let _ = terminal.clear();
+    stop.store(false, Ordering::Relaxed);
+    *input_handle = Some(spawn_input_thread(input_tx.clone(), Arc::clone(stop)));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,9 +172,13 @@ enum InputEvent {
     NextFile,
     PrevFile,
     ToggleSidebar,
+    Edit,
 }
 
-fn spawn_input_thread(tx: crossbeam_channel::Sender<InputEvent>, stop: Arc<AtomicBool>) {
+fn spawn_input_thread(
+    tx: crossbeam_channel::Sender<InputEvent>,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
     thread::Builder::new()
         .name("input".into())
         .spawn(move || {
@@ -135,7 +204,7 @@ fn spawn_input_thread(tx: crossbeam_channel::Sender<InputEvent>, stop: Arc<Atomi
                 }
             }
         })
-        .expect("input thread spawn");
+        .expect("input thread spawn")
 }
 
 fn translate(evt: Event) -> Option<InputEvent> {
@@ -154,6 +223,7 @@ fn translate(evt: Event) -> Option<InputEvent> {
         (KeyCode::Char('n'), _) => Some(InputEvent::NextFile),
         (KeyCode::Char('b'), _) => Some(InputEvent::PrevFile),
         (KeyCode::Char('s'), _) => Some(InputEvent::ToggleSidebar),
+        (KeyCode::Char('e'), _) | (KeyCode::Enter, _) => Some(InputEvent::Edit),
         _ => None,
     }
 }
@@ -295,7 +365,7 @@ fn draw(
         height: footer_h,
     };
     let hint = Paragraph::new(Line::from(vec![Span::styled(
-        " q quit · j/k line · u/d or PgUp/PgDn page · n/b file · g top · s sidebar ",
+        " q quit · j/k line · u/d or PgUp/PgDn page · n/b file · g top · s sidebar · e edit ",
         Style::default().fg(Color::DarkGray),
     )]));
     frame.render_widget(hint, footer);
@@ -590,6 +660,23 @@ impl TerminalGuard {
         }));
         *flag = true;
         Ok(TerminalGuard)
+    }
+
+    /// Hand the tty back to a child process — leave alt screen, drop raw mode.
+    /// Pair with [`resume`].
+    fn suspend(&self) -> Result<()> {
+        execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| Error::Term { source: e })?;
+        disable_raw_mode().map_err(|e| Error::Term { source: e })?;
+        Ok(())
+    }
+
+    /// Reclaim the tty after the child exits. The panic hook is unaffected
+    /// (registered once via `install`), so a panic between suspend and resume
+    /// still cleans up.
+    fn resume(&self) -> Result<()> {
+        enable_raw_mode().map_err(|e| Error::Term { source: e })?;
+        execute!(io::stdout(), EnterAlternateScreen).map_err(|e| Error::Term { source: e })?;
+        Ok(())
     }
 }
 

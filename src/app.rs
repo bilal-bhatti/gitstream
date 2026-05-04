@@ -36,6 +36,6 @@ pub fn run(repo_root: PathBuf) -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("repository")
         .to_string();
-    render::run(&repo_name, up_rx)?;
+    render::run(&repo_name, &repo_root, up_rx)?;
     Ok(())
 }
